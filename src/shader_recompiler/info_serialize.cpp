@@ -13,12 +13,12 @@ namespace {
 // Every field of Info is listed in VisitInfo below. An info that grows a field has to be listed
 // there too: this size check fails the build until it is (update the size with it).
 #if defined(_MSC_VER) && defined(_WIN64)
-static_assert(sizeof(Info) == 6936,
+static_assert(sizeof(Info) == 6992,
               "Shader::Info changed: list the new fields in VisitInfo, then update this size");
 // The descriptors are held in vectors, so a field they grow does not change sizeof(Info).
 static_assert(sizeof(ConstantBufferDescriptor) == 8 && sizeof(StorageBufferDescriptor) == 80 &&
                   sizeof(TextureBufferDescriptor) == 40 && sizeof(ImageBufferDescriptor) == 28 &&
-                  sizeof(TextureDescriptor) == 44 && sizeof(ImageDescriptor) == 36,
+                  sizeof(TextureDescriptor) == 48 && sizeof(ImageDescriptor) == 36,
               "A Shader::Info descriptor changed: list the new fields in its Visit function below, "
               "then update these sizes and PrecompiledInfosMagic (vk_pipeline_cache.cpp)");
 static_assert(sizeof(StorageWriteExtent) == 60,
