@@ -421,13 +421,7 @@ public:
                     case 17: case 18: case 19: case 20: case 21:
                         value = both ? known(taken(d.op[lane]) ? ~0U : 0) : unknown;
                         break;
-                    case 22: // A register
-                        value = unknown;
-                        if (both)
-                            effects.register_reads.push_back((a + b) & 0xffff);
-                        else
-                            effects.register_reads_known = false;
-                        break;
+                    case 22: value = unknown; break; // A register
                     case 23:
                         if (imm < 2) break;
                         // Entered, or skipped with a count of 0. Its last instruction may start
@@ -460,14 +454,7 @@ public:
                         if (!both || !jumps) flow[flow_count++] = {Flow::Next, 0, false};
                         break;
                     }
-                    case 30:
-                        effects.data_ram = true;
-                        value = unknown;
-                        if (x.known)
-                            effects.data_ram_reads.push_back(a);
-                        else
-                            effects.data_ram_reads_known = false;
-                        break;
+                    case 30: effects.data_ram = true; value = unknown; break;
                     case 31: effects.data_ram = true; break;
                     default: break; // 7: the load barrier
                     }

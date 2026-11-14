@@ -439,10 +439,6 @@ GraphicsPipeline::GraphicsPipeline(
                    return desc.handle_program == ~0U && !desc.has_secondary;
                });
     });
-    retexture_eligible = std::ranges::all_of(stage_infos, [](const Shader::Info& info) {
-        return info.texture_buffer_descriptors.empty() && info.image_buffer_descriptors.empty() &&
-               info.image_descriptors.empty();
-    });
     writes_images = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
         return any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
@@ -821,18 +817,15 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
-        {
-            const Profile::FineScope storage_scope{Profile::Zone::StorageBindings};
-            buffer_cache.UnbindGraphicsStorageBuffers(stage);
-            if constexpr (Spec::has_storage_buffers) {
-                size_t ssbo_index{};
-                for (const auto& desc : info.storage_buffers_descriptors) {
-                    ASSERT(desc.count == 1);
-                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                           desc.cbuf_offset, desc.is_written,
-                                                           desc.indirect_offset);
-                    ++ssbo_index;
-                }
+        buffer_cache.UnbindGraphicsStorageBuffers(stage);
+        if constexpr (Spec::has_storage_buffers) {
+            size_t ssbo_index{};
+            for (const auto& desc : info.storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written,
+                                                       desc.indirect_offset);
+                ++ssbo_index;
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
@@ -987,7 +980,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
-    Profile::AddFine(Profile::FineCounter::TextureHandles, views.size());
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
     if (resolve_in_full) {
@@ -1079,13 +1071,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         delta_computed_handles.assign(computed_handles.begin(), computed_handles.end());
         delta_computed_values.assign(computed_values.begin(), computed_values.end());
         configured_stages = Spec::enabled_stages;
-        delta_raw_handles.clear();
-        if (retexture_eligible && !ReadRawHandles(delta_raw_handles)) {
-            delta_raw_handles.clear();
-        }
         delta_views_valid = true;
         kept_images_valid = false;
-        NextDeltaGeneration();
     }
     if (captured_delta) {
         kept_image_entries.clear();
@@ -1175,7 +1162,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
-        const Profile::FineScope geometry_scope{Profile::Zone::GeometryBuffers};
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
 
@@ -1374,9 +1360,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
         if (replay_images) {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             const auto [first, count] = kept_image_ranges[stage];
-            if (count != 0) {
-                guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
-            }
+            guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
         } else {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             const size_t first_entry = guest_descriptor_queue.UpdateCount();

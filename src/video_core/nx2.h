@@ -565,15 +565,8 @@ public:
     static constexpr u32 AcquireEqual = 0x1;
     static constexpr u32 AcquireGequal = 0x4;
     static constexpr u32 AcquireMask = 0x8;
-    /// TEST (EDEN_NX2_ACQUIRE_STATS): the writer that latched a waiter.
-    enum class Source : u8 {
-        Unknown,
-        PayloadRelease,
-        QueryResult,
-        QmdReduction,
-        QmdMax,
-        Count,
-    };
+    /// One per channel suspended at once.
+    static constexpr size_t MaxWaiters = 64;
 
     static Nx2SemaphoreWaiters& Get() {
         static Nx2SemaphoreWaiters waiters;
@@ -616,28 +609,25 @@ public:
             return;
         }
         std::scoped_lock lk{mutex};
-        std::erase_if(waiters, [owner](const Waiter& w) { return w.owner == owner; });
-        Publish();
-    }
-
-    [[nodiscard]] bool Latched(const void* owner) {
-        if (count.load(std::memory_order_acquire) == 0 ||
-            latched.load(std::memory_order_acquire) == 0) {
-            return false;
-        }
-        std::scoped_lock lk{mutex};
-        return std::ranges::any_of(waiters,
-                                   [owner](const Waiter& w) { return w.owner == owner && w.latched; });
-    }
-
-    [[nodiscard]] Source LatchSource(const void* owner) {
-        std::scoped_lock lk{mutex};
-        for (const Waiter& w : waiters) {
-            if (w.owner == owner && w.latched) {
-                return w.source;
+        for (Slot& slot : slots) {
+            if (slot.owner.load(std::memory_order_relaxed) == owner) {
+                slot.owner.store(nullptr, std::memory_order_relaxed);
+                count.fetch_sub(1, std::memory_order_relaxed);
             }
         }
-        return Source::Unknown;
+    }
+
+    [[nodiscard]] bool Latched(const void* owner) const {
+        if (count.load(std::memory_order_acquire) == 0) {
+            return false;
+        }
+        for (const Slot& slot : slots) {
+            if (slot.owner.load(std::memory_order_relaxed) == owner) {
+                // Acquire: what the engine wrote before the latch is visible after it.
+                return slot.latched.load(std::memory_order_acquire);
+            }
+        }
+        return false;
     }
 
     /// GPU thread: whether a watched word changed in memory since it was added or since the last
@@ -661,9 +651,8 @@ public:
     }
 
     /// A GPU write of value to the u32 at device_address.
-    void OnWrite(u64 device_address, u32 value, Source source = Source::Unknown) {
-        const size_t waiting = count.load(std::memory_order_acquire);
-        if (waiting == 0) {
+    void OnWrite(u64 device_address, u32 value) {
+        if (count.load(std::memory_order_acquire) == 0) {
             return;
         }
         bool latched = false;
@@ -693,39 +682,22 @@ private:
         std::atomic<bool> latched{};
     };
 
-    static constexpr size_t WatchedSlots = 8;
-
-    /// Under `mutex`: the waiters' addresses, latched count and count for the unlocked checks.
-    void Publish() {
-        size_t latched_waiters = 0;
-        for (size_t i = 0; i < waiters.size(); ++i) {
-            if (i < WatchedSlots) {
-                watched[i].store(waiters[i].address, std::memory_order_relaxed);
-            }
-            latched_waiters += waiters[i].latched ? 1 : 0;
-        }
-        latched.store(latched_waiters, std::memory_order_relaxed);
-        count.store(waiters.size(), std::memory_order_release);
-    }
-
-    static bool Matches(const Waiter& w, u32 current) {
-        switch (w.operation) {
+    static bool Matches(const Slot& slot, u32 current) {
+        switch (slot.operation) {
         case AcquireEqual:
-            return current == w.value;
+            return current == slot.value;
         case AcquireGequal:
-            return current >= w.value;
+            return current >= slot.value;
         case AcquireMask:
-            return (current & w.value) != 0;
+            return (current & slot.value) != 0;
         default:
             return false;
         }
     }
 
-    std::mutex mutex;
-    std::vector<Waiter> waiters;
+    std::mutex mutex; ///< Held to fill, empty and latch slots
+    std::array<Slot, MaxWaiters> slots{};
     std::atomic<size_t> count{};
-    std::atomic<size_t> latched{}; ///< Latched waiters
-    std::array<std::atomic<u64>, WatchedSlots> watched{}; ///< The first waiters' addresses
 };
 
 } // namespace Tegra

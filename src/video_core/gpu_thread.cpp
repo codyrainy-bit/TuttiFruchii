@@ -19,7 +19,6 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
-#include "video_core/front_qmd.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
@@ -95,9 +94,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
-            WaitStats::MaybeReport(split.Active());
-            VideoCommon::Nx2DrainCheck::MaybeReport();
-            VideoCommon::Nx2AcquireStats::MaybeReport();
+            if (VideoCommon::g_acquire_counting) {
+                split.ReportAcquire();
+            }
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores and list copies: a new command, a GPU
                 // release or a finished copy wakes the wait below at once (Nx2PendingWake), so
@@ -182,10 +181,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 break;
             }
             if (split.Active()) {
-                // Between commands the back may have run out of work, and everything sent.
-                split.PublishSoon();
-                VideoCommon::FrontQmdView::Get().MaybeTakeOver(
-                    split, VideoCommon::Nx2AcquireStats::QmdTakeOver::BetweenCommands);
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
@@ -199,14 +194,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     split.Defer([] { VideoCommon::Nx2FastDraw::NoteSync(); },
                                 VideoCommon::GpuSplit::FastDrawNeutral);
                     Profile::Scope scope{Profile::Zone::Push};
-                    Tegra::Nx2ListStats::NoteListQueued(submit_list->channel, -1);
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                    // The sync operations (the back may run them between any two entries too,
-                    // GpuSplit::RequestTick): flushes write guest memory where GPU work wrote.
                     // TickWork ends fast draw reuse itself when it runs a request.
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); },
-                                VideoCommon::GpuSplit::Writes::Caches,
                                 VideoCommon::GpuSplit::FastDrawNeutral);
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     if (run->before_later_reads) {
@@ -215,26 +206,21 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         split.Drain(VideoCommon::DrainSite::Map);
                     } else {
                         split.DeferFunction(std::move(run->func));
-                        split.TagUnplaced(VideoCommon::UnplacedKind::RunCommand); // TEST
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                    // Writes guest memory with what the caches hold of it.
-                    split.Defer([rasterizer_ptr, addr = flush->addr,
-                                 size = flush->size] { rasterizer_ptr->FlushRegion(addr, size); },
-                                VideoCommon::GpuSplit::Writes::Caches);
+                    split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
+                        rasterizer_ptr->FlushRegion(addr, size);
+                    });
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                    split.Defer(
-                        [rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
-                            rasterizer_ptr->OnCacheInvalidation(addr, size);
-                        },
-                        VideoCommon::GpuSplit::Writes::Noted);
+                    split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
+                        rasterizer_ptr->OnCacheInvalidation(addr, size);
+                    });
                 } else {
                     ASSERT(false);
                 }
-                split.Defer([state_ptr = &state, fence = next.fence,
-                             block = next.block] { SignalCommand(*state_ptr, fence, block); },
-                            VideoCommon::GpuSplit::Writes::Noted,
-                            VideoCommon::GpuSplit::FastDrawNeutral);
+                split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {
+                    SignalCommand(*state_ptr, fence, block);
+                }, VideoCommon::GpuSplit::FastDrawNeutral);
                 split.Publish();
                 last_progress = std::chrono::steady_clock::now();
                 continue;
@@ -245,7 +231,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                 VideoCommon::Nx2FastDraw::NoteSync();
                 Profile::Scope scope{Profile::Zone::Push};
-                Tegra::Nx2ListStats::NoteListQueued(submit_list->channel, -1);
                 scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 Profile::Scope scope{Profile::Zone::Tick};
@@ -269,7 +254,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
 }
 
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async) {
-    Tegra::Nx2ListStats::NoteListQueued(channel, 1);
     PushCommand(SubmitListCommand(channel, std::move(entries)), false, is_async);
 }
 

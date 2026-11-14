@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <optional>
 #include <thread>
@@ -21,7 +22,6 @@
 #endif
 #include <cstring>
 #include <string>
-#include <string_view>
 
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
@@ -31,7 +31,6 @@
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
-#include "video_core/gpu_wait_stats.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_back_idle_trace.h"
@@ -181,12 +180,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                          std::getenv("EDEN_NX2_ACQUIRE_STATS") != nullptr ||
                          std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
     ring = std::make_unique<u64[]>(RingWords);
-    if (!placed_log) {
-        placed_log = std::make_unique<PlacedLogEntry[]>(PlacedLogSize);
-    }
-    ++starts; // Before the back starts: it tags the entries of fenced writes with it (EntryTag)
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
+    ++starts;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
@@ -211,23 +207,12 @@ void GpuSplit::Stop() {
     last_writer_position = 0;
     last_sync_position = 0;
     synced_writer_position = 0;
-    last_entry_start = 0;
-    back_entry_start = 0;
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
-    last_unplaced_write = 0;
-    last_mapping_change = 0;
-    last_unplaced_kind = UnplacedKind::Other;
-    last_mapping_kind = UnplacedKind::Other;
     last_noted_write = 0;
-    write_sets.fill({});
-    coarse_sets.fill({});
-    placed_log_count = 0;
-    placed_log_lost = 0;
+    write_positions.fill(0);
     published_local = 0;
-    publish_held = false;
-    logged_method_count = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
@@ -243,7 +228,6 @@ void GpuSplit::Stop() {
     back_idle_at.store(~u64{0}, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
-    tick_requested.store(false, std::memory_order_relaxed);
 }
 
 u64* GpuSplit::ReserveSlow(size_t words) {
@@ -282,35 +266,10 @@ void GpuSplit::WaitForSpace(size_t words) {
     }
 }
 
-void GpuSplit::NoteFirstUnpublished() {
-    first_unpublished_ticks = Nx2Profile::Ticks();
-}
-
-void GpuSplit::NoteEarlyPublish() {
-    Nx2Profile::Add(Nx2Profile::Counter::EarlyPublishes, 1);
-}
-
-void GpuSplit::NoteLatePublish() {
-    const u64 idle_since = back_idle_since.load(std::memory_order_relaxed);
-    if (idle_since == 0 || first_unpublished_ticks == 0) {
-        return;
-    }
-    // The back could have run the words since it ran out of work or since the first was sent.
-    const u64 since = std::max(idle_since, first_unpublished_ticks);
-    const u64 now = Nx2Profile::Ticks();
-    if (now > since) {
-        Nx2Profile::Add(Nx2Profile::Counter::LatePublishTicks, now - since);
-        Nx2Profile::Add(Nx2Profile::Counter::LatePublishes, 1);
-    }
-}
-
 void GpuSplit::Publish() {
     FlushState();
     if (published_local == write_position) {
         return;
-    }
-    if (profile_publishes) [[unlikely]] {
-        NoteLatePublish(); // TEST
     }
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
@@ -324,7 +283,7 @@ void GpuSplit::Publish() {
 void GpuSplit::Drain(DrainSite site) {
     FlushState();
     consumed_cache = consumed.load(std::memory_order_acquire);
-    if (consumed_cache == write_position) {
+    if (consumed_cache == write_position && BackQuiet()) {
         return;
     }
     Publish();
@@ -332,12 +291,28 @@ void GpuSplit::Drain(DrainSite site) {
     const BackIdleTrace::FrontWait idle_trace{WaitState(site)};
     const CountedWait counted{site};
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
+    // Everything consumed is not enough: the back submits deferred work (Scheduler::DeferFlush)
+    // from its idle hook afterwards, and the caller may use the scheduler once this returns.
+    bool hook_asked = false;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
-            publish_every = PublishAfterWait;
-            Nx2Profile::AddDrain(site, start);
-            return;
+            if (BackQuiet()) {
+                publish_every = 8;
+                Nx2Profile::AddDrain(site, start);
+                return;
+            }
+            if (!hook_asked) {
+                RequestIdleHook();
+                hook_asked = true;
+            }
+            // Backoff sleeps only while entries are unconsumed: spin until the hook is done.
+            if (spins < 16384) {
+                Pause();
+            } else {
+                std::this_thread::yield();
+            }
+            continue;
         }
         Backoff(spins, write_position);
     }
@@ -351,33 +326,7 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-bool GpuSplit::WaitForSyncedWriters(DrainSite site) {
-    return WaitFor(std::min(synced_writer_position, write_position), site);
-}
-
-GpuSplit::Landing GpuSplit::FencedPayloadLanding() {
-    // As QueryCacheBase::CounterReport decides is_synced.
-    const bool synced = Settings::IsGPUFenceBehaviorDefault()
-                            ? !Settings::IsGPULevelHigh()
-                            : !Settings::IsGPUFenceBehaviorBalanced() &&
-                                  !Settings::IsGPUFenceBehaviorAccurate();
-    return synced ? Landing::AtRun : Landing::Fenced;
-}
-
-void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least,
-                                  Landing landing) {
-    // TEST (EDEN_NX2_SEM_WATCH_DEVICE): every release sent to the watched word.
-    if (WatchesSemaphore(device_address)) [[unlikely]] {
-        LOG_INFO(HW_GPU,
-                 "Semaphore watch: release {:#x} to {:#x} sent at {} by {} (known {}, at least {}, "
-                 "{}); ran {}",
-                 payload, device_address, write_position,
-                 front_engine != nullptr && front_engine->bound_type
-                     ? EngineName(front_engine->bound_type)
-                     : std::string_view{"the puller"},
-                 known, at_least, landing == Landing::Fenced ? "fenced" : "at run",
-                 consumed.load(std::memory_order_acquire));
-    }
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
     if (semaphore_writes.size() >= semaphore_writes_limit) {
         // The words of releases the back ran hold their values in memory.
         const u64 done = consumed.load(std::memory_order_acquire);
@@ -385,55 +334,18 @@ void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, b
             semaphore_writes, [done](const auto& entry) { return entry.second.position <= done; });
         semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
     }
-    // The release is in the last entry sent, or one before (a QMD signal valued late).
-    SemaphoreWrite write{write_position, EntryTag(last_entry_start), payload,
-                         known,          at_least,                   landing == Landing::Fenced};
-    const u64 word = device_address & ~u64{3};
-    if (const auto it = semaphore_writes.find(word);
-        !write.fenced && it != semaphore_writes.end() && it->second.fenced &&
-        fenced_landed.load(std::memory_order_acquire) <= it->second.entry) {
-        // A fenced write sent before may land after this one: until it did, the word holds
-        // either.
-        write.entry = it->second.entry;
-        write.known = false;
-        write.at_least = false;
-        write.fenced = true;
-    }
-    semaphore_writes.insert_or_assign(word, write);
+    semaphore_writes.insert_or_assign(device_address & ~u64{3},
+                                      SemaphoreWrite{write_position, payload, known});
 }
 
 std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
     u64 device_address) const {
     const auto it = semaphore_writes.find(device_address & ~u64{3});
-    if (it == semaphore_writes.end() || InMemory(it->second)) {
+    if (it == semaphore_writes.end() ||
+        it->second.position <= consumed.load(std::memory_order_acquire)) {
         return std::nullopt;
     }
-    return QueuedSemaphoreWrite{it->second.payload, it->second.known, it->second.at_least,
-                                it->second.fenced, it->second.position};
-}
-
-bool GpuSplit::WritersPending() const {
-    return consumed.load(std::memory_order_acquire) <
-           std::min(last_writer_position, write_position);
-}
-
-std::string GpuSplit::DescribeState(u64 device_address) const {
-    std::string text = fmt::format(
-        "split: sent {}, published {}, ran {}, back idle at {:#x}, back waiting {}, last writer {}, "
-        "last sync {}",
-        write_position, published_local, consumed.load(std::memory_order_acquire),
-        back_idle_at.load(std::memory_order_relaxed), back_waiting.load(std::memory_order_relaxed),
-        last_writer_position, last_sync_position);
-    if (const auto it = semaphore_writes.find(device_address & ~u64{3});
-        it != semaphore_writes.end()) {
-        const SemaphoreWrite& write = it->second;
-        text += fmt::format("; last write sent: {:#x} at {} (entry {:#x}), known {}, at least {}, "
-                            "fenced {}, landed up to {:#x}, in memory {}",
-                            write.payload, write.position, write.entry, write.known,
-                            write.at_least, write.fenced,
-                            fenced_landed.load(std::memory_order_acquire), InMemory(write));
-    }
-    return text;
+    return QueuedSemaphoreWrite{it->second.payload, it->second.known};
 }
 
 namespace {
@@ -457,99 +369,20 @@ void ForEachDeviceRange(const Tegra::MemoryManager& memory, GPUVAddr address, u6
 } // Anonymous namespace
 
 void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) {
-    NoteWriteAt(memory, address, size, write_position);
-}
-
-void GpuSplit::NoteWriteAt(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size,
-                           u64 position) {
-    if (size == 0) {
+    if (size > MaxNotedBytes || address + size < address) {
+        NoteAnyWrite();
         return;
     }
-    if (size > MaxCoarseNotedBytes || address + size < address) {
-        NoteUnplacedWrite();
-        TagUnplaced(UnplacedKind::Oversized); // TEST
-        return;
-    }
-    if (size > MaxNotedBytes) {
-        ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
-            NoteCoarseDeviceWriteAt(device, bytes, position);
-        });
-        return;
-    }
-    ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
-        NoteDeviceWriteAt(device, bytes, position);
-    });
+    ForEachDeviceRange(memory, address, size,
+                       [this](DAddr device, u64 bytes) { NoteDeviceWrite(device, bytes); });
 }
 
-void GpuSplit::NoteSetWrite(WriteSet& set, u64 granule, u64 position) {
-    const u32 tag = static_cast<u32>(granule);
-    size_t oldest = 0;
-    for (size_t way = 0; way < WriteWays; ++way) {
-        if (set.granules[way] == tag) {
-            set.positions[way] = std::max(set.positions[way], position);
-            return;
-        }
-        if (set.positions[way] < set.positions[oldest]) {
-            oldest = way;
-        }
-    }
-    // The granule's earlier writes, if any, are among the evicted ones.
-    const u64 granule_before = set.evicted;
-    set.evicted = std::max(set.evicted, set.positions[oldest]);
-    set.granules[oldest] = tag;
-    set.positions[oldest] = std::max(position, granule_before);
-}
-
-u64 GpuSplit::SetTarget(const WriteSet& set, u64 granule) {
-    const u32 tag = static_cast<u32>(granule);
-    for (size_t way = 0; way < WriteWays; ++way) {
-        if (set.granules[way] == tag) {
-            return set.positions[way];
-        }
-    }
-    return set.evicted;
-}
-
-void GpuSplit::NoteDeviceWriteAt(DAddr address, u64 size, u64 position) {
+void GpuSplit::NoteDeviceWrite(DAddr address, u64 size) {
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
-        NoteSetWrite(write_sets[WriteSlot(granule)], granule, position);
+        write_positions[WriteSlot(granule)] = write_position;
     }
-    last_noted_write = std::max(last_noted_write, position);
-    LogPlacedWrite(address, size, position);
-}
-
-void GpuSplit::NoteCoarseDeviceWriteAt(DAddr address, u64 size, u64 position) {
-    const u64 last = (address + size - 1) >> CoarseGranuleBits;
-    for (u64 granule = address >> CoarseGranuleBits; granule <= last; ++granule) {
-        NoteSetWrite(coarse_sets[CoarseSlot(granule)], granule, position);
-    }
-    last_noted_write = std::max(last_noted_write, position);
-    LogPlacedWrite(address, size, position);
-}
-
-std::optional<u64> GpuSplit::ExactPlacedTarget(const Tegra::MemoryManager& memory,
-                                               GPUVAddr address, u64 size) const {
-    const u64 ran = consumed.load(std::memory_order_acquire);
-    if (!placed_log || placed_log_lost > ran) {
-        return std::nullopt;
-    }
-    const u64 first = placed_log_count - (std::min<u64>)(placed_log_count, PlacedLogSize);
-    u64 target = 0;
-    ForEachDeviceRange(memory, address, size, [&](DAddr device, u64 bytes) {
-        const DAddr end = device + bytes;
-        for (u64 index = placed_log_count; index > first; --index) {
-            const PlacedLogEntry& entry = placed_log[(index - 1) & (PlacedLogSize - 1)];
-            // Every entry noted before this one was noted by then: the back ran them all.
-            if (entry.sent <= ran) {
-                return;
-            }
-            if (entry.begin < end && device < entry.end && entry.position > ran) {
-                target = (std::max)(target, entry.position);
-            }
-        }
-    });
-    return target;
+    last_noted_write = write_position;
 }
 
 u64 GpuSplit::WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) const {
@@ -563,37 +396,11 @@ u64 GpuSplit::WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
     return target;
 }
 
-u64 GpuSplit::MemoryWritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
-                                 u64 size) const {
-    u64 target = last_unplaced_write;
-    if (size > MaxNotedBytes || address + size < address) {
-        target = std::max(target, last_noted_write);
-    } else {
-        ForEachDeviceRange(memory, address, size, [this, &target](DAddr device, u64 bytes) {
-            target = std::max(target, DeviceWritesTarget(device, bytes));
-        });
-    }
-    return std::min(target, write_position);
-}
-
-u64 GpuSplit::PlacedWritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
-                                 u64 size) const {
-    u64 target = 0;
-    ForEachDeviceRange(memory, address, size, [this, &target](DAddr device, u64 bytes) {
-        target = std::max(target, DeviceWritesTarget(device, bytes));
-    });
-    return std::min(target, write_position);
-}
-
 u64 GpuSplit::DeviceWritesTarget(DAddr address, u64 size) const {
     u64 target = 0;
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
-        target = std::max(target, SetTarget(write_sets[WriteSlot(granule)], granule));
-    }
-    const u64 last_coarse = (address + size - 1) >> CoarseGranuleBits;
-    for (u64 granule = address >> CoarseGranuleBits; granule <= last_coarse; ++granule) {
-        target = std::max(target, SetTarget(coarse_sets[CoarseSlot(granule)], granule));
+        target = std::max(target, write_positions[WriteSlot(granule)]);
     }
     return target;
 }
@@ -602,6 +409,10 @@ bool GpuSplit::WaitForWrites(const Tegra::MemoryManager& memory, GPUVAddr addres
     FlushState(); // A block that may issue a deferred draw notes its write anywhere.
     return WaitFor(std::min(WritesTarget(memory, address, size), write_position),
                    DrainSite::MacroDmaWrites);
+}
+
+bool GpuSplit::WaitForSyncedWriters() {
+    return WaitFor(std::min(synced_writer_position, write_position), DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
@@ -620,8 +431,6 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
-            // The back may run out of what was sent before long.
-            publish_every = PublishAfterWait;
             Nx2Profile::AddDrain(site, start);
             return true;
         }
@@ -699,54 +508,17 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         amount -= piece;
         methods_pending -= piece;
     }
-    if (log_methods) [[unlikely]] {
-        LogMethod(engine, method); // TEST
+    if (writes == Writes::Anywhere) {
+        NoteAnyWrite();
     }
-    NoteWrites(writes);
 }
 
-void GpuSplit::LogMethod(const Tegra::Engines::EngineInterface* engine, u32 method) {
-    if (!logged_methods) {
-        logged_methods = std::make_unique<SentMethod[]>(LoggedMethods);
-    }
-    logged_methods[logged_method_count++ & (LoggedMethods - 1)] = {write_position,
-                                                                   engine->bound_type, method};
-}
-
-std::string GpuSplit::MethodEndingAt(u64 end) const {
-    if (!logged_methods || logged_method_count == 0) {
-        return {};
-    }
-    // Ends grow with the count: a binary search over the ones kept.
-    u64 low = logged_method_count > LoggedMethods ? logged_method_count - LoggedMethods : 0;
-    u64 high = logged_method_count;
-    while (low < high) {
-        const u64 middle = low + (high - low) / 2;
-        if (logged_methods[middle & (LoggedMethods - 1)].end < end) {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    if (low == logged_method_count) {
-        return {};
-    }
-    const SentMethod& sent = logged_methods[low & (LoggedMethods - 1)];
-    if (sent.end != end) {
-        return {};
-    }
-    // Not typeid: without RTTI (MSVC's /GR-) it reads type data the engines don't have.
-    return fmt::format("{} {:#x}", EngineName(sent.engine), sent.method);
-}
-
-void GpuSplit::DeferFunction(std::function<void()>&& func, Writes writes) {
+void GpuSplit::DeferFunction(std::function<void()>&& func) {
     auto* const heap = new std::function<void()>(std::move(func));
-    Defer(
-        [heap] {
-            (*heap)();
-            delete heap;
-        },
-        writes);
+    Defer([heap] {
+        (*heap)();
+        delete heap;
+    });
 }
 
 size_t GpuSplit::Execute(const u64* entry, size_t words) {
@@ -886,7 +658,6 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     u64 idle_since = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread", true);
-        MaybeTick();
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
@@ -895,29 +666,32 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             // The front publishes what it holds after a few more words from now on.
             back_idle_at.store(read_position, std::memory_order_relaxed);
-            Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-            const GpuWaitStats::IdleScope idle{GpuWaitStats::g_back_idle_ns};
-            // TEST (profile_publishes): out of work from now until this block ends.
-            struct IdleMark {
-                std::atomic<u64>& since;
-                ~IdleMark() {
-                    since.store(0, std::memory_order_relaxed);
-                }
-            } const idle_mark{back_idle_since};
-            if (profile_publishes) {
-                back_idle_since.store(Nx2Profile::Ticks(), std::memory_order_relaxed);
-            }
+            const auto spin_start = g_acquire_counting ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
-                                !hook_requested.load(std::memory_order_relaxed) &&
-                                !tick_requested.load(std::memory_order_relaxed);
+                                !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
             }
-            if (available == read_position && idle_hook != nullptr) {
+            if (g_acquire_counting) {
+                Count(g_acquire_stats.back_waits);
+                Count(g_acquire_stats.back_spin_ns,
+                      static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - spin_start)
+                                           .count()));
+            }
+            if (available == read_position) {
                 hook_requested.store(false, std::memory_order_seq_cst);
-                idle_hook(idle_argument);
+                // The front may already see everything consumed: Drain() waits for back_quiet
+                // too, so the deferred submit can't overlap whatever the front does next.
+                if (!back_quiet.load(std::memory_order_relaxed)) {
+                    if (idle_hook != nullptr) {
+                        idle_hook(idle_argument);
+                    }
+                    back_quiet.store(true, std::memory_order_release);
+                }
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position) {
@@ -926,11 +700,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 back_waiting.store(true, std::memory_order_seq_cst);
                 const u32 seen = wake.load(std::memory_order_seq_cst);
                 available = published.load(std::memory_order_seq_cst);
-                // A request made after the hook ran (RequestIdleHook) runs it before sleeping, and
-                // a requested tick runs at the top of the loop.
+                // A request made after the hook ran (RequestIdleHook) runs it before sleeping.
                 if (available == read_position && !stop_token.stop_requested() &&
-                    !hook_requested.load(std::memory_order_seq_cst) &&
-                    !tick_requested.load(std::memory_order_seq_cst)) {
+                    !hook_requested.load(std::memory_order_seq_cst)) {
+                    Count(g_acquire_stats.back_sleeps);
                     wake.wait(seen, std::memory_order_seq_cst);
                 }
                 back_waiting.store(false, std::memory_order_relaxed);
@@ -942,9 +715,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             idle_since = 0;
         }
         u64 last_store = read_position;
+        // Before any entry runs, so a front that sees these entries consumed also sees this.
+        back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
-            back_entry_start = read_position;
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
             read_position += size != 0 ? size : RingWords - index;
@@ -953,10 +727,6 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }
-            // A guest thread waits for a flush: run it now, not after the draws and compute work
-            // still queued here, or after everything the front holds (the guest synchronized with
-            // the GPU work it reads before it read, so that work ran on this thread already).
-            MaybeTick();
             // Hand ring space back now and then while working through a long batch, and at once
             // when the front waits for this position (WaitForWriters).
             if ((read_position - last_store >= 4096 ||

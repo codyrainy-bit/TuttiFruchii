@@ -20,7 +20,6 @@
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
-#include "video_core/gpu_split.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
@@ -272,12 +271,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return;
     }
     DAddr cpu_addr = *cpu_addr_opt;
-    if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
-        LOG_INFO(HW_GPU,
-                 "Semaphore watch: report {:#x} to {:#x} (gpu {:#x}, as {}, type {}, flags {:#x}) on {}",
-                 payload, cpu_addr, addr, gpu_memory->GetID(), static_cast<u32>(counter_type),
-                 static_cast<u32>(flags), VideoCommon::GpuSplit::ThreadRole());
-    }
     const size_t new_query_id = streamer->WriteCounter(cpu_addr, has_timestamp, payload, subreport);
     auto* query = streamer->GetQuery(new_query_id);
     if (is_fence) {
@@ -292,24 +285,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     };
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
-    // A fence-flagged payload release writes a constant, so at low accuracy with Default fences
-    // it stays synchronized as before #337: its fence may be skipped and the query freed at once.
-    // Only reports of GPU counters wait for their fence to run.
-    const bool is_synced = is_fence && counter_type == QueryType::Payload &&
-                           (Settings::IsGPUFenceBehaviorDefault()
-                                ? !Settings::IsGPULevelHigh()
-                                : !Settings::IsGPUFenceBehaviorBalanced() &&
-                                      !Settings::IsGPUFenceBehaviorAccurate());
-    // The GPU thread split's back entry this report came in: the front counts the report in
-    // memory once its operation ran with a fence (GpuSplit::NoteFencedWrite). A synced release's
-    // operation doesn't run in fence order, so it must not count earlier reports as landed.
-    const std::optional<u64> split_entry =
-        is_synced ? std::nullopt : VideoCommon::GpuSplit::Get().BackEntry();
     const u64 report_size = has_timestamp ? 16 : 4;
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
-    // Synced payload callbacks can run ahead of older fenced reports at the same address.
-    // They must not retire one of those reports from the buffer cache's ordered tracking.
+    // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
     const bool report_noted =
         !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
     // What the operation needs, small enough for MSVC's std::function to hold without allocating:
@@ -351,9 +330,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             if (op.noted) {
                 impl->rasterizer.FinishReport(cpu_addr, report_size);
             }
-            if (op.split_entry != ~u64{0}) {
-                VideoCommon::GpuSplit::Get().NoteFencedWrite(op.split_entry);
-            }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
@@ -363,9 +339,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                          trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            if (!is_synced) {
-                impl->pending_unregister.push_back(query_location);
-            }
+            impl->pending_unregister.push_back(query_location);
             return;
         }
         if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
@@ -378,9 +352,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            if (!is_synced) {
-                impl->pending_unregister.push_back(query_location);
-            }
+            impl->pending_unregister.push_back(query_location);
             return;
         }
         query_base->value += streamer->GetAmendValue();
@@ -408,15 +380,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         if (!mirrored && counter_type == QueryType::Payload) {
             shadow.NoteDirectRelease(cpu_addr, addr);
         }
-        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
-            cpu_addr, static_cast<u32>(query_base->value),
-            counter_type == QueryType::Payload ? Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease
-                                               : Tegra::Nx2SemaphoreWaiters::Source::QueryResult);
-        if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
-            LOG_INFO(HW_GPU, "Semaphore watch: {:#x} written to {:#x} at its fence (mirrored {}) on {}",
-                     static_cast<u32>(query_base->value), cpu_addr, mirrored,
-                     VideoCommon::GpuSplit::ThreadRole());
-        }
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
         if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
             const bool wide = True(query_base->flags & QueryFlagBits::HasTimestamp);
             LOG_INFO(HW_GPU,
@@ -432,13 +396,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                   "the report operation must fit MSVC's std::function storage");
     std::function<void()> operation(operation_body);
     if (is_fence) {
-        VideoCore::g_signaling_query_report_fence = !is_synced;
+        VideoCore::g_signaling_query_report_fence = true;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
-        if (is_synced) {
-            streamer->Free(new_query_id);
-            return;
-        }
     } else {
         if (immediate) {
             FinishReads(cpu_addr, has_timestamp ? 16 : 4);
@@ -458,13 +418,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             if (!mirrored) {
                 shadow.NoteDirectRelease(cpu_addr, addr);
             }
-            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
-                cpu_addr, payload, Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease);
-            if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
-                LOG_INFO(HW_GPU, "Semaphore watch: {:#x} written to {:#x} at once (mirrored {}, diverted {}) on {}",
-                         payload, cpu_addr, mirrored, mirrored && shadow.Diverts(cpu_addr),
-                         VideoCommon::GpuSplit::ThreadRole());
-            }
+            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY write n={} path=immediate as={} gpu={:#x} device={:#x} type={} "
@@ -786,7 +740,7 @@ template <typename Traits>
 void QueryCacheBase<Traits>::FinishReads(DAddr address, size_t size) {
     // SemiFlushQueryDirty asks with cache_mutex held, which no holder of the buffer cache's lock
     // takes.
-    if (VideoCore::ReadDownloadsMayCover(address, size)) [[unlikely]] {
+    if (VideoCore::ReadDownloadsMayCover(address, size)) {
         if (VideoCore::ReadCheckWrites::Enabled()) {
             VideoCore::ReadCheckWrites::Note(address, size, "a query result");
         }

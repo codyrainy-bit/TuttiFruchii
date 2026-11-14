@@ -221,7 +221,6 @@ public:
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
         subchannels[subchannel_id] = engine;
         subchannel_type[subchannel_id] = engine_type;
-        engine->bound_type = engine_type;
     }
 
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
@@ -285,14 +284,6 @@ public:
     /// flushes and reads guest memory. With `pending`, a copy the GPU has not finished sets
     /// `*pending` and pending_list_tick instead of waiting (the result is false then).
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
-    /// A GPU-written list that is all the parameters of the compute macro call about to start,
-    /// on the split with macros on its front: if the call only moves the words where the back can
-    /// take them over (Nx2ListIndirect), puts their placeholders in command_headers instead of
-    /// reading them. The back copies the words at the list's place on the host GPU.
-    bool TakeGpuWrittenListWords(const CommandListHeader& header);
-    /// EDEN_NX2_LIST_VERIFY: reads the list ReadGpuWrittenCommands just read again as before
-    /// (Nx2ListStats) and leaves the words read last in command_headers.
-    void VerifyGpuWrittenCommands(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
@@ -358,13 +349,8 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
-    /// The registers of the channel's copy engine (MaxwellDMA::RegisterCount) and its
-    /// inline-to-memory engine (KeplerMemory::Regs::NUM_REGS), as the methods sent left them
-    /// (ShadowEngineMethod): where the back's copies and uploads write.
-    static constexpr size_t DmaRegisterCount = 0x800;
-    static constexpr size_t InlineToMemoryRegisterCount = 0x7f;
-    std::array<u32, DmaRegisterCount> dma_registers{};
-    std::array<u32, InlineToMemoryRegisterCount> inline_to_memory_registers{};
+    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
+    std::array<u32, 3> dma_semaphore{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;

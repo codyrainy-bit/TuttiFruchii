@@ -21,7 +21,6 @@
 #include "video_core/nx2_list_macro_trace.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
-#include "video_core/nx2_read_trace.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_null/renderer_null.h"

@@ -15,7 +15,6 @@
 #include "core/hle/kernel/k_process.h"
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
-#include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/host1x/host1x.h"
@@ -336,17 +335,8 @@ T MemoryManager::Read(GPUVAddr addr) const {
 
 template <typename T>
 void MemoryManager::Write(GPUVAddr addr, T data) {
-    if (VideoCommon::GpuSplit::SemaphoreWatch() != 0) [[unlikely]] {
-        // TEST (EDEN_NX2_SEM_WATCH_DEVICE)
-        if (const auto address = GpuToCpuAddress(addr);
-            address && VideoCommon::GpuSplit::WatchCovers(*address, sizeof(T))) {
-            LOG_INFO(HW_GPU, "Semaphore watch: MemoryManager::Write {:#x} at {:#x} on {}, was {:#x}",
-                     static_cast<u64>(data), *address, VideoCommon::GpuSplit::ThreadRole(),
-                     Read<u32>(addr & ~GPUVAddr{3}));
-        }
-    }
     // A download for a guest read not yet in guest memory would land over this write later.
-    if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) [[unlikely]] {
+    if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) {
         if (const auto address = GpuToCpuAddress(addr);
             address && rasterizer != nullptr &&
             VideoCore::ReadDownloadsMayCover(*address, sizeof(T))) {

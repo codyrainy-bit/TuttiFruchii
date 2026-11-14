@@ -153,9 +153,6 @@ protected:
             }
             // Oldest first, as they were freed.
             reusable.swap(old_queries);
-            reusable_head = old_queries_head;
-            old_queries.clear();
-            old_queries_head = 0;
         }
         const size_t new_id = reusable[reusable_head++];
         new (&slot_queries[new_id]) QueryType(std::forward<Args>(args)...);
@@ -165,11 +162,6 @@ protected:
     void ReleaseQuery(size_t query_id) {
 
         if (query_id < slot_queries.size()) {
-            if (old_queries_head >= 1024 && old_queries_head * 2 >= old_queries.size()) {
-                old_queries.erase(old_queries.begin(),
-                                  old_queries.begin() + static_cast<std::ptrdiff_t>(old_queries_head));
-                old_queries_head = 0;
-            }
             old_queries.push_back(query_id);
             return;
         }

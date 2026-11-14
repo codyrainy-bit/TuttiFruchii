@@ -19,11 +19,9 @@ class MemoryManager;
 
 /// A draw that follows a draw of the same pipeline with only light state changes in between takes
 /// the delta path. It keeps the previous draw's pipeline, image views, samplers and texture buffer
-/// bindings. Buffers are resolved and bound again, except small streamed uniforms whose ranges
-/// were not rebound or written: those can keep the previous stream allocation in the same command
-/// buffer. This assumes no unsynchronized guest CPU writes unknown to the caches between draws;
-/// EDEN_NX2_UBO_KEEP_VERIFY checks that assumption. Kept image descriptors and rescaling words are
-/// replayed while the views remain valid; EDEN_NX2_DELTA_DESCRIPTORS_VERIFY checks the replay.
+/// bindings, and resolves and binds every buffer (index, vertex, uniform, storage, texture) again
+/// as a full resolve does, so guest memory written without a notification is streamed as in a
+/// full resolve.
 /// Light changes are draw parameters, index buffer and vertex stream registers, constant buffer
 /// binds and inline constant buffer data (collected in g_delta: the rasterizer resolves in full
 /// when they reach the pipeline's texture handles at their GPU addresses or through another
@@ -34,10 +32,7 @@ class MemoryManager;
 /// GpuSplit::FastDrawNeutral), GPU::TickWork requests, texture cache writes, unmaps and
 /// deletions, shader removals, fence releases, HLE macros and frames. The rasterizer takes the
 /// delta path only while the serial, the GPU memory map, the command buffer, the render pass and
-/// the bound pipeline are the ones the previous draw left. A draw of another pipeline (or after a
-/// draw that can't be followed) takes it with what that pipeline kept at its own last draw while
-/// the memory serial, the map, the command buffer, the render pass and the texture pool registers
-/// are the ones that draw left, reading every texture handle again (the rasterizer's RevisitDraw).
+/// the bound pipeline are the ones the previous draw left.
 /// EDEN_NX2_FAST_DRAW_VERIFY=1 resolves those draws in full and counts where the pipeline, views,
 /// samplers or kept buffer bindings differ.
 namespace VideoCommon::Nx2FastDraw {
@@ -144,12 +139,6 @@ inline u64 Serial() {
     t_reads_serial = true;
     t_serial_bumped = false;
     return g_serial.load(std::memory_order_relaxed);
-}
-
-inline u64 MemorySerial() {
-    t_reads_serials = true;
-    t_memory_serial_bumped = false;
-    return g_memory_serial.load(std::memory_order_relaxed);
 }
 
 /// The device memory a GPU range maps to. A write through another GPU address that maps the
@@ -335,19 +324,5 @@ inline void NoteDeviceData(DAddr begin, DAddr end) {
                                               delta.num_device_writes, begin, end);
     }
 }
-
-/// Inline constant buffer writes left out of the delta because they wrote the words memory
-/// held (EDEN_NX2_GPU_PROFILE logs them).
-inline std::atomic<u64> g_unchanged_writes{};
-
-/// Notes data about to be written to [begin, begin + bytes) in GPU memory: inline constant buffer
-/// `words`, unless memory holds those words already, or with `words` null data not known yet
-/// (reports). Texture and sampler headers are checked by the caller.
-void NoteWrittenData(Tegra::MemoryManager& memory, GPUVAddr begin, const void* words, u64 bytes);
-/// NoteWrittenData for inline constant buffer `words` the caller is about to write: true when
-/// the write changes nothing and can be left out (memory holds the words, and neither the GPU
-/// caches nor a download for a guest read may hold others there). Fast draws off: false.
-[[nodiscard]] bool WriteData(Tegra::MemoryManager& memory, GPUVAddr begin, const void* words,
-                             u64 bytes);
 
 } // namespace VideoCommon::Nx2FastDraw

@@ -430,11 +430,6 @@ private:
 
     void KeepImageDescriptors(size_t stage, size_t first_entry);
 
-    /// Appends the texture handles of the configured stages (CanRetexture pipelines) as
-    /// ConfigureImpl reads or computes them, and the computed ones to `computed` too. False when
-    /// a constant buffer a handle is read from isn't bound.
-    bool ReadRawHandles(std::vector<u32>& out, std::vector<u32>* computed = nullptr) const;
-
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
@@ -481,18 +476,10 @@ private:
     /// Every texture is sampled with a handle read from a constant buffer: ConfigureImpl can
     /// resolve them from texture_memo.
     bool texture_memo_eligible{};
-    /// Textures only, their handles read or computed (CanRetexture).
-    bool retexture_eligible{};
     VideoCommon::SampledTextureMemo texture_memo;
     bool writes_images{};
 
     DeltaBlocker delta_blocker{};
-    /// DeltaGeneration, from a counter all pipelines share (only the drawing thread bumps it).
-    void NextDeltaGeneration() noexcept {
-        delta_generation = ++delta_generations;
-    }
-    inline static u64 delta_generations{};
-    u64 delta_generation{};
     bool delta_views_valid{};
     bool capture_delta{};
     bool verify_delta{};
