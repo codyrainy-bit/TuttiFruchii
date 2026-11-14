@@ -160,7 +160,7 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 }
 
 template <class P>
-void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
+void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool image_failed) {
     const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
     TrimHostImagePool(out_of_memory || total_used_memory >= critical_memory);
     bool high_priority_mode = false;
@@ -191,8 +191,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             collection_trace.aggressive += aggressive_mode ? 1 : 0;
         }
     };
-    const auto CanEvict = [this, &high_priority_mode, &aggressive_mode,
-                           &evict_old_costly](ImageId image_id, bool* out_must_download = nullptr) {
+    const auto CanEvict = [this, &high_priority_mode, &aggressive_mode, &evict_old_costly,
+                           image_failed](ImageId image_id, bool* out_must_download = nullptr) {
+        (void)image_failed; // only read where the backend has IsRescaledBc
         const auto& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             if (mem_trace_enabled) {
@@ -204,6 +205,19 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
         if (out_must_download != nullptr) {
             *out_must_download = must_download;
+        }
+        // Images the backend re-compresses at a rounded-up size (Vulkan's RescalesUnevenBc on
+        // AMD: title 1's terrain material arrays, ~405 MiB together) are only collected when an
+        // image could not be made, or once their GPU range was unmapped (Remapped: nothing reads
+        // it again). Re-made on every return to the field, each took a 0.4-2 s stall; kept, with
+        // the cache under its cap, the 2nd zone change went from 1951 ms to 364 ms. Up to 1 GiB
+        // of them in all: a title with more is collected as before.
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            if (!image_failed && image.IsRescaledBc() &&
+                rescaled_bc_bytes <= MaxKeptRescaledBytes &&
+                False(image.flags & ImageFlagBits::Remapped)) {
+                return false;
+            }
         }
         if (!aggressive_mode && !evict_old_costly &&
             True(image.flags & ImageFlagBits::CostlyLoad)) {
@@ -1092,7 +1106,7 @@ void TextureCache<P>::TickFrame() {
     // A forced collect for memory spilled to host memory collects as at the critical threshold
     // for this frame, without the re-upload of images left out that a failed image gets.
     if (out_of_memory || spill_collect || total_used_memory > minimum_memory) {
-        RunGarbageCollector(out_of_memory || spill_collect);
+        RunGarbageCollector(out_of_memory || spill_collect, out_of_memory);
     }
     if (out_of_memory) {
         // Textures left out for lack of memory are made again on their next read, once a frame
@@ -3140,6 +3154,13 @@ bool TextureCache<P>::UploadsByLayer(const ImageBase& image) const noexcept {
         if (True(image.flags & ImageFlagBits::SparseLayers)) {
             return true;
         }
+        // Layers are decoded straight into the image (an RGBA8 storage view of it): not for
+        // images re-compressed to BC at another size (IsRescaledBc), which upload whole.
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            if (static_cast<const Image&>(image).IsRescaledBc()) {
+                return false;
+            }
+        }
         return True(image.flags & ImageFlagBits::AcceleratedUpload) &&
                image.info.type == ImageType::e2D && image.info.resources.layers > 1 &&
                image.guest_size_bytes >= LayerUploadMinSize &&
@@ -4913,6 +4934,11 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     image.channel = current_channel_id;
     image.address_space = current_address_space;
     total_used_memory += ImageMemoryBytes(slot_images[image_id]);
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (slot_images[image_id].IsRescaledBc()) {
+            rescaled_bc_bytes += ImageAllocationBytes(slot_images[image_id]);
+        }
+    }
     image.lru_index = lru_cache.Insert(image_id, frame_tick);
 
     ForEachGPUPage(image.gpu_addr, image.guest_size_bytes, [this, image_id](u64 page) {
@@ -5157,6 +5183,12 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     const u64 scaled_bytes = ScaledImageMemoryBytes(slot_images[image_id]);
     // TickFrame sets the total from the driver, which can be under the sum of these estimates.
     total_used_memory = ReleaseImageMemory(total_used_memory, original_bytes, scaled_bytes);
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (slot_images[image_id].IsRescaledBc()) {
+            rescaled_bc_bytes -=
+                (std::min)(rescaled_bc_bytes, ImageAllocationBytes(slot_images[image_id]));
+        }
+    }
     // What the driver's usage still counts until the memory goes (ImageAllocationBytes).
     const u64 freed_bytes = ImageAllocationBytes(slot_images[image_id]) + scaled_bytes;
     const GPUVAddr gpu_addr = image.gpu_addr;
