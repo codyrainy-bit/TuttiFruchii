@@ -290,6 +290,10 @@ public:
     /// Takes a complete compute macro call's GPU-written parameters as slot placeholders when
     /// a tagged dry run proves the front can leave their values to the host GPU.
     bool TakeGpuWrittenListWords(const CommandListHeader& header);
+    /// List indexed draws (nx2_list_indexed_draw.h): the entry at `address` is the five
+    /// GPU-written parameters of an indexed indirect draw macro call; returns whether the 3D
+    /// engine took them without waiting for them.
+    bool TakeListIndexedDraw(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
