@@ -1,0 +1,83 @@
+name: android
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Attach the APK to the newest GitHub release
+        type: boolean
+        default: false
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Android APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      # The native build fetches every third-party dependency through CPM into .cache/cpm.
+      - name: Cache CPM downloads
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-android-v1-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake') }}
+          restore-keys: |
+            cpm-android-v1-
+            cpm-linux-x86_64-v2-
+
+      - name: Build APK
+        run: |
+          cd src/android
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleMainlineRelWithDebInfo
+
+      - name: Collect APKs
+        run: find src/android/app/build/outputs/apk -name '*.apk' -print -exec du -h {} \;
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-android-arm64-v8a
+          path: src/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Attach to the newest release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          echo "newest release: $tag"
+          for apk in $(find src/android/app/build/outputs/apk -name '*.apk'); do
+            cp "$apk" "lichii-${tag}-android-arm64-v8a-$(basename "$apk")"
+          done
+          gh release upload "$tag" lichii-*.apk --clobber
