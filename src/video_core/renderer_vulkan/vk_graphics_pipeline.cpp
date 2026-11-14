@@ -408,11 +408,8 @@ GraphicsPipeline::GraphicsPipeline(
             continue;
         }
         stage_infos[stage] = *info;
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
         stage_enabled[stage] = true;
-=======
         stage_present[stage] = true;
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
         enabled_uniform_buffer_masks[stage] = info->constant_buffer_mask;
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
         num_image_elements += Shader::NumDescriptors(info->texture_buffer_descriptors);
@@ -481,7 +478,6 @@ GraphicsPipeline::GraphicsPipeline(
         // the constant buffers bound and the data in memory then.
         const auto add = [&](const auto& desc) {
             if (desc.handle_program != ~0U) {
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
                 has_computed_handles = true;
                 return;
             }
@@ -493,7 +489,6 @@ GraphicsPipeline::GraphicsPipeline(
                               desc.secondary_cbuf_offset + 4);
                 }
             }
-=======
                 return;
             }
             // Each element's word on its own: strided arrays leave words between the handles.
@@ -514,7 +509,6 @@ GraphicsPipeline::GraphicsPipeline(
                               desc.secondary_cbuf_offset + 4);
                 }
             }
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
         };
         for (const auto& desc : info.texture_buffer_descriptors) {
             add(desc);
@@ -764,10 +758,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     boost::container::small_vector<ComputedHandle, 16> computed_handles;
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-=======
     boost::container::small_vector<u32, 64> computed_values;
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
 
@@ -887,7 +878,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
                 const u32 value{VideoCommon::EvaluateTextureHandle(
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
                     info, desc.handle_program, *gpu_memory,
                     [&](u32 cbuf) -> GPUVAddr {
                         return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
@@ -914,11 +904,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     computed_handles.back().descriptor != computed.descriptor) {
                     computed_handles.push_back(computed);
                 }
-=======
                     info, desc.handle_program, *gpu_memory, cbuf_address,
                     device.GetStorageBufferAlignment(), index)};
                 note_computed(desc, index, value);
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
                 return TexturePair(value, via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);
@@ -1127,10 +1115,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         delta_views.assign(views.begin(), views.end());
         delta_samplers.assign(samplers.begin(), samplers.end());
         delta_computed_handles.assign(computed_handles.begin(), computed_handles.end());
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-=======
         delta_computed_values.assign(computed_values.begin(), computed_values.end());
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
         configured_stages = Spec::enabled_stages;
         delta_raw_handles.clear();
         if (retexture_eligible && !ReadRawHandles(delta_raw_handles)) {
@@ -1326,7 +1311,6 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
 bool GraphicsPipeline::SharesDeltaStateWith(const GraphicsPipeline& other) const noexcept {
     if (delta_blocker != DeltaBlocker::None || other.delta_blocker != DeltaBlocker::None ||
         mesh_emulation || other.mesh_emulation || stage_enabled != other.stage_enabled ||
@@ -1571,7 +1555,6 @@ bool GraphicsPipeline::ResolveChangedViews(std::span<const u32> elements,
     kept_images_valid = false;
     NextDeltaGeneration();
     return true;
-=======
 bool GraphicsPipeline::ComputedHandlesChanged() const {
     for (const ComputedHandle& handle : delta_computed_handles) {
         const Shader::Info& info{stage_infos[handle.stage]};
@@ -1608,7 +1591,6 @@ bool GraphicsPipeline::ComputedHandlesChanged() const {
         }
     }
     return false;
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
 }
 
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {

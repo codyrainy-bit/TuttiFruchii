@@ -399,7 +399,6 @@ public:
     /// ConfigureDelta prepares none, Configure does.
     [[nodiscard]] bool DeltaImagesChange() const noexcept;
 
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     /// Whether `other` resolves the same image views, samplers and image descriptors from the same
     /// constant buffer words: the same stages, and the same texture and image descriptors in each
     /// (the same shaders when a handle is computed at draw time). What one kept for delta draws
@@ -447,7 +446,6 @@ public:
     /// resolves only their descriptors' views. Returns how many views it resolved (0 when none
     /// changed), or nothing when the draw must resolve in full.
     std::optional<u32> RetextureComputed();
-=======
     /// The shader info of a pipeline stage (vertex B to fragment), null for a stage it lacks.
     [[nodiscard]] const Shader::Info* StageInfo(size_t stage) const noexcept {
         return stage_present[stage] ? &stage_infos[stage] : nullptr;
@@ -462,7 +460,6 @@ public:
     [[nodiscard]] bool IsPrecompiled() const noexcept {
         return precompiled;
     }
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
@@ -517,14 +514,11 @@ private:
     std::array<std::vector<u8>, NUM_STAGES> kept_spirv; ///< zstd, after the build
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     /// Stages with a shader, and whether a handle is computed at draw time (SharesDeltaStateWith).
     std::array<bool, NUM_STAGES> stage_enabled{};
     bool has_computed_handles{};
-=======
     std::array<bool, NUM_STAGES> stage_present{};
     bool precompiled{};
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
@@ -564,7 +558,6 @@ private:
         handle_word_index{};
     std::vector<VideoCommon::ImageViewInOut> delta_views;
     std::vector<VideoCommon::SamplerId> delta_samplers;
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     /// The handles delta_views and delta_samplers were resolved from (CanRetexture pipelines,
     /// RetextureDelta), and RetextureDelta's scratch.
     std::vector<u32> delta_raw_handles;
@@ -572,16 +565,13 @@ private:
     std::vector<u32> retexture_computed;
     /// A handle the captured Configure computed at draw time: the descriptor it was read for
     /// (stage, kind as ComputedHandleKind, index in its list) and its value.
-=======
     /// A descriptor whose handles the captured Configure computed at draw time: the descriptor
     /// (stage, kind as ComputedHandleKind, index in its list) and its elements' values, count of
     /// them from delta_computed_values[first_value].
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     struct ComputedHandle {
         u8 stage;
         u8 kind;
         u16 descriptor;
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
         u32 value;
     };
     enum ComputedHandleKind : u8 { TextureBuffer, ImageBuffer, Texture, Image };
@@ -592,14 +582,12 @@ private:
     /// and keeps them (the next ConfigureDelta pushes their descriptors again). False when
     /// resolving deleted or rescaled images (the fast draw serial changed): nothing kept.
     bool ResolveChangedViews(std::span<const u32> elements, std::span<const u32> raws);
-=======
         u32 count;
         u32 first_value;
     };
     enum ComputedHandleKind : u8 { TextureBuffer, ImageBuffer, Texture, Image };
     std::vector<ComputedHandle> delta_computed_handles;
     std::vector<u32> delta_computed_values;
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     /// Delta draws: the image descriptor entries (first entry and count per
     /// stage) and rescaling words pushed for delta_views, which delta draws push again while no
     /// image changed its scale (TextureCache::ScaleEpoch).

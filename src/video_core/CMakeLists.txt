@@ -101,11 +101,7 @@ add_library(video_core STATIC
     macro_memo.h
     macro_turing.h
     fence_manager.h
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     front_qmd.h
-=======
-    frame_gen_choice.h
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     gpu.cpp
     gpu.h
     gpu_timestamp.h
@@ -113,18 +109,7 @@ add_library(video_core STATIC
     gpu_split.h
     gpu_thread.cpp
     gpu_thread.h
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     gpu_wait_stats.h
-=======
-    gpu_trace/replay.cpp
-    gpu_trace/replay.h
-    gpu_trace/sample.cpp
-    gpu_trace/sample.h
-    gpu_trace/state.cpp
-    gpu_trace/state.h
-    gpu_trace/trace_file.cpp
-    gpu_trace/trace_file.h
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     guest_memory.h
     invalidation_accumulator.h
     memory_manager.cpp
@@ -155,11 +140,6 @@ add_library(video_core STATIC
     nx2_stutter_trace.cpp
     nx2_stutter_trace.h
     nx2_perf.h
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-=======
-    nx2_async_readback.h
-    nx2_backx.h
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     nx2_download_trace.h
     nx2_read_trace.h
     pending_maps.h

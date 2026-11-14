@@ -262,15 +262,12 @@ struct FixedPipelineState {
 
     void Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFeatures& features);
 
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-=======
     /// Native (Switch 2) pipelines: clears state that cannot change the pipeline, so draws that
     /// differ only there share one and precompiled keys match them: attribute types of inputs the
     /// vertex program does not read (vertex input is dynamic), blend equations and factors of
     /// attachments without blending, and attachments past the last colour target.
     void CanonicalizeNative(u32 generic_read_mask) noexcept;
 
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     /// attribute_types as the registers give it: with VK_EXT_vertex_input_dynamic_state, all that
     /// the vertex attribute formats put in the key.
     [[nodiscard]] static u64 DynamicAttributeTypes(const Maxwell& regs) noexcept;

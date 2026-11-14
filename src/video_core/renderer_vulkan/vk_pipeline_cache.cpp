@@ -1114,15 +1114,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         Settings::values.vertex_input_dynamic_state.GetValue();
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     // Neither the key's strides (extended dynamic state) nor its vertex input (dynamic vertex
     // input) depend on the vertex streams' stride and enable word then.
     VideoCommon::Nx2FastDraw::g_vertex_streams_dynamic =
         dynamic_features.has_extended_dynamic_state && dynamic_features.has_dynamic_vertex_input;
-=======
-    VideoCommon::Nx2FastDraw::g_dynamic_vertex_input.store(
-        dynamic_features.has_dynamic_vertex_input, std::memory_order_relaxed);
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
 
     dynamic_features.has_provoking_vertex = device.IsExtProvokingVertexSupported();
     dynamic_features.has_provoking_vertex_first_mode =
@@ -4603,14 +4598,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
     }
 
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-    // Texture descriptors are read without a flush (ReadTextureInfo), so parallel translation
-    // never submits through the GPU thread's scheduler or needs a pool-wide flush.
-    if (std::ranges::count_if(graphics_key.unique_hashes, [](u64 hash) { return hash != 0; }) >=
-        2) {
-        parallel.emplace();
-    }
-=======
     const auto precompiled_begin = std::chrono::steady_clock::now();
     auto pipeline{CreatePrecompiledGraphicsPipeline(environments)};
     if (pipeline) {
@@ -4634,40 +4621,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         pipeline->SetMappedPointers(std::move(mapped_pointers));
     } else {
-        // Shader cache v2: two or more stages translate at once on the shader jobs' CPU workers
-        // while this thread waits. Only this thread may flush guest memory, as reading a texture
-        // descriptor does, so the descriptor pool is flushed here first; with this thread waiting
-        // nothing can make it dirty again. A pool too large to flush on every miss translates here
-        // as before (VideoCommon::MaxFlushedTexturePoolBytes), as does one running past the GPU
-        // address space, which FlushRegion would skip whole.
+        // Texture descriptors are read without a flush (ReadTextureInfo), so parallel translation
+        // never submits through the GPU thread's scheduler or needs a pool-wide flush.
         if (std::ranges::count_if(graphics_key.unique_hashes,
                                   [](u64 hash) { return hash != 0; }) >= 2) {
-            static_assert(sizeof(Tegra::Texture::TICEntry) ==
-                          VideoCommon::TextureDescriptorBytes);
-            const auto& tex_header = maxwell3d->regs.tex_header;
-            const u64 pool_bytes = VideoCommon::TexturePoolBytes(tex_header.limit);
-            const std::optional<u64> pool_last =
-                VideoCommon::TexturePoolLastAddress(tex_header.Address(), tex_header.limit);
-            if (VideoCommon::CanFlushTexturePool(tex_header.limit) && pool_last &&
-                gpu_memory->IsWithinGPUAddressRange(*pool_last)) {
-                gpu_memory->FlushRegion(tex_header.Address(), pool_bytes);
-                for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-                    if (graphics_key.unique_hashes[index] != 0) {
-                        environments.envs[index].SetTexturePoolFlushed();
-                    }
-                }
-                parallel.emplace();
-            } else {
-                static std::atomic<bool> logged{};
-                if (!logged.exchange(true, std::memory_order_relaxed)) {
-                    LOG_INFO(Render_Vulkan,
-                             "Texture descriptor pool of {} bytes: pipelines that use it "
-                             "translate on the GPU thread",
-                             pool_bytes);
-                }
-            }
+            parallel.emplace();
         }
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
+    }
 
         // Native programs emit their SPIR-V in the pipeline's job instead of here
         std::shared_ptr<ShaderPools> emit_pools;

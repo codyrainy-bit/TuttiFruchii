@@ -503,9 +503,6 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         return entry;
     }
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
-<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
-    gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
-=======
     if (texture_pool_flushed) {
         gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
     } else {
@@ -521,7 +518,6 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         null_2d_texture();
         return entry;
     }
->>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
         std::getenv("EDEN_NX2_RENDER_TRACE")) {
         static std::atomic<u32> traces{};
