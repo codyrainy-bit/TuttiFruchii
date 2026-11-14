@@ -21,6 +21,7 @@
 #include <fmt/ranges.h>
 
 #include "common/range_sets.inc"
+#include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/compute_write_grid.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
@@ -2953,7 +2954,12 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Native programs keep tables next to their code in a 64 KiB bank read with indirect offsets
     // (Splatoon Raiders: the dialogue box corners in c1). Writes to that memory can go unnoticed by
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
-    const bool native_bank = has_host_buffer &&
+    // Ocarina of Time is left out (unless EDEN_NX2_PERF_VERIFY=1): a compare of its banks against
+    // shadow copies found no page changed behind the tracker, and the uploads cost frame rate.
+    constexpr u64 ocarina_of_time = 0x0400486024DEC000ULL;
+    const bool bank_recheck =
+        Settings::GetCurrentProgramID() != ocarina_of_time || Nx2Perf::Verify();
+    const bool native_bank = bank_recheck && has_host_buffer &&
                              (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
                              size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling();
     bool verify_kept = false;
