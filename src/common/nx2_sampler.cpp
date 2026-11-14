@@ -35,7 +35,6 @@ constexpr size_t MaxDepth = 40;
 struct Sample {
     unsigned thread;
     unsigned depth;
-    bool faulted; ///< the walk stopped at an access violation
     std::array<DWORD64, MaxDepth> frames;
 };
 
@@ -174,15 +173,16 @@ bool InModule(const Modules& modules, DWORD64 address) {
 // could be paused holding the heap lock. A wrong unwind step (code with missing or wrong unwind
 // data) leaves a garbage stack pointer: reading through it crashed the process, so the walk
 // stops once the stack pointer leaves the thread's stack.
-void Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames, const NT_TIB* tib,
-          const Modules& modules, unsigned& depth) {
+unsigned Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames, const NT_TIB* tib,
+              const Modules& modules) {
     if (tib == nullptr) {
-        return;
+        return 0;
     }
     const auto on_stack = [tib](DWORD64 rsp) {
         return rsp >= reinterpret_cast<DWORD64>(tib->StackLimit) &&
                rsp + 8 <= reinterpret_cast<DWORD64>(tib->StackBase) && (rsp & 7) == 0;
     };
+    unsigned depth = 0;
     while (depth < MaxDepth && context.Rip != 0 && on_stack(context.Rsp)) {
         frames[depth++] = context.Rip;
         // Generated code ends the walk. The JIT's unwind data describes its entry prologue only,
@@ -207,26 +207,6 @@ void Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames, const NT_TIB* 
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context,
                          &handler_data, &establisher_frame, nullptr);
     }
-}
-
-// RtlVirtualUnwind also reads through the frame register, which the stack check above doesn't
-// cover: a thread paused in a fiber switch with Rbp 0 made it read address 0, and the access
-// violation took the process down (EDEN_NX2_SAMPLE=CPUCore_*). Such a walk keeps the frames it
-// found.
-unsigned GuardedWalk(const CONTEXT& context, std::array<DWORD64, MaxDepth>& frames,
-                     const NT_TIB* tib, const Modules& modules, bool& faulted) {
-    unsigned depth = 0;
-    faulted = false;
-#ifdef _MSC_VER
-    __try {
-        Walk(context, frames, tib, modules, depth);
-    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER
-                                                                 : EXCEPTION_CONTINUE_SEARCH) {
-        faulted = true;
-    }
-#else
-    Walk(context, frames, tib, modules, depth);
-#endif
     return depth;
 }
 
@@ -310,15 +290,8 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
         std::map<std::string, unsigned> inclusive;
         std::map<std::string, unsigned> self_caller;
         unsigned total = 0;
-        unsigned faulted = 0;
-        unsigned empty = 0;
         for (const Sample& sample : samples) {
-            if (sample.thread != thread) {
-                continue;
-            }
-            faulted += sample.faulted ? 1 : 0;
-            if (sample.depth == 0) {
-                ++empty;
+            if (sample.thread != thread || sample.depth == 0) {
                 continue;
             }
             ++total;
@@ -349,12 +322,10 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
                              sorted[i].second.c_str());
             }
         };
-        text += fmt::format("=== thread \"{}\": {} samples ({} without a stack, {} walks stopped "
-                            "by a fault)\n",
-                            targets[thread].name, total, empty, faulted);
+        text += fmt::format("=== thread \"{}\": {} samples\n", targets[thread].name, total);
         print("self (where the thread is)", self, 60);
         // The hottest instructions as module offsets, for llvm-symbolizer --relative-address
-        // (which line of a function, inlined code included). Enough to sum them per line.
+        // (which line of a function, inlined code included).
         std::map<DWORD64, unsigned> addresses;
         for (const Sample& sample : samples) {
             if (sample.thread == thread && sample.depth != 0) {
@@ -367,7 +338,7 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
         }
         std::sort(hot.rbegin(), hot.rend());
         text += "-- self by instruction (module+offset)\n";
-        for (size_t i = 0; i < (std::min<size_t>)(hot.size(), 400); ++i) {
+        for (size_t i = 0; i < (std::min<size_t>)(hot.size(), 60); ++i) {
             const DWORD64 address = hot[i].second;
             HMODULE module{};
             char module_path[MAX_PATH] = "?";
@@ -434,8 +405,7 @@ std::string SampleThreads(const std::vector<std::string>& patterns, double secon
             if (GetThreadContext(handle, &context)) {
                 Sample& sample = samples.emplace_back();
                 sample.thread = i;
-                sample.depth = GuardedWalk(context, sample.frames, targets[i].tib, modules,
-                                           sample.faulted);
+                sample.depth = Walk(context, sample.frames, targets[i].tib, modules);
             }
             ResumeThread(handle);
         }

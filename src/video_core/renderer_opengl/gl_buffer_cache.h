@@ -12,7 +12,6 @@
 #include "common/common_types.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
-#include "video_core/buffer_cache/upload_order.h"
 #include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
 #include "video_core/renderer_opengl/gl_staging_buffer_pool.h"
@@ -73,9 +72,8 @@ public:
 
     void FreeDeferredStagingBuffer(StagingBufferMap& buffer);
 
-    VideoCommon::UploadOrder DecideUploadOrder(const Buffer&,
-                                               std::span<const VideoCommon::BufferCopy>) {
-        return {};
+    bool CanReorderUpload(const Buffer&, std::span<const VideoCommon::BufferCopy>) {
+        return false;
     }
 
     void CopyBuffer(GLuint dst_buffer, GLuint src_buffer,
@@ -86,7 +84,7 @@ public:
 
     void CopyBuffer(Buffer& dst_buffer, GLuint src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                    VideoCommon::UploadOrder order = {});
+                    bool can_reorder_upload = false);
 
     void CopyBuffer(Buffer& dst_buffer, Buffer& src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool);
