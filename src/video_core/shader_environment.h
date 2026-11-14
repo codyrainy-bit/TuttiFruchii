@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -307,6 +306,26 @@ public:
         return lacks_recorded_value &&
                (!recorded_read_properties || *recorded_read_properties == read_properties);
     }
+
+    /// Whether translating this recorded environment gives what translating `live`, the same
+    /// program as the game draws it now, would (the same code is assumed: the pipeline keys
+    /// match). Translation is decided by the answers to its questions, so each recorded question
+    /// is asked of `live`: a constant buffer value must be the same, unless it was only used as a
+    /// texture handle (then the texture it names now must have the same type and the same pixel
+    /// format traits as the recorded one) or as a storage buffer pointer word (then its
+    /// classification must be the same); texture questions, storage pointer classifications and
+    /// the other recorded answers must be the same. Sets `why` to the first answer that differs.
+    /// `format_traits` limits the pixel format traits compared to those the program's
+    /// translation used (PixelFormatTraits bits; see PipelineCache's precompiled pipelines).
+    [[nodiscard]] bool AnswersHoldFor(Shader::Environment& live, const char** why = nullptr,
+                                      u32 format_traits = ~0U);
+
+    /// Pixel format traits translation uses: integer formats (sampled textures).
+    static constexpr u32 FormatTraitInteger = 1;
+    /// R16_FLOAT and the byte-addressed 32-bit color formats (byte-addressed image stores).
+    static constexpr u32 FormatTraitByteAddressed = 2 | 4;
+    /// Snorm formats (buffer texel fetches on hosts without snorm render buffers).
+    static constexpr u32 FormatTraitSnorm = 8;
 
 private:
     std::vector<u64> code;

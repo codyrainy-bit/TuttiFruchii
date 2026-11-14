@@ -28,9 +28,9 @@
 #include "qt_common/config/qt_config.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
-#include "yuzu/compatibility_report.h"
-#include "yuzu/hotkeys.h"
-#include "yuzu/user_data_migration.h"
+#include "lichii/compatibility_report.h"
+#include "lichii/hotkeys.h"
+#include "lichii/user_data_migration.h"
 
 #ifdef __unix__
 #include <QDBusObjectPath>
@@ -52,6 +52,7 @@ class GImageInfo;
 class GRenderWindow;
 class LoadingScreen;
 class OverlayDialog;
+class BugReportDialog;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
@@ -300,6 +301,8 @@ private:
     void LoadAmiibo(const QString& filename);
 
     bool SelectAndSetCurrentUser(const Core::Frontend::ProfileSelectParameters& parameters);
+    bool ConfirmLowRamBoot(const QString& filename,
+                           const Service::AM::FrontendAppletParameters& params);
 
     /**
      * Stores the filename in the recently loaded files list.
@@ -371,11 +374,16 @@ private slots:
     void OnGameListRemovePlayTimeData(u64 program_id);
     void OnGameListSetPlayTime(u64 program_id);
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path, DumpRomFSTarget target);
+    void OnGameListBuildPrecompiledFromPlay(u64 program_id, const std::string& game_path);
     void OnGameListVerifyIntegrity(const std::string& game_path);
     void OnGameListConvertToNup(const std::string& game_path);
     void OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path);
     void OnGameListDeleteShaderWarm(u64 program_id);
     void PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path);
+    /// Builds the game's precompiled file from its recorded shader cache and its files, with a
+    /// progress window. True when it was built.
+    bool BuildPrecompiledFromPlay(u64 program_id, const std::string& game_path, bool at_launch);
+    void OfferPrecompiledBuild(u64 title_id, const std::string& game_path);
     void OnGameListExtractNup(const std::string& game_path);
     void OnGameListEditNupMetadata(const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
@@ -450,6 +458,7 @@ private slots:
     void OnCreateHomeMenuDesktopShortcut();
     void OnCreateHomeMenuApplicationMenuShortcut();
     void OnCaptureScreenshot();
+    void OnReportBug();
     /// Checks for decryption keys; `prompt` asks to install them when they are missing.
     void OnCheckFirmwareDecryption(bool prompt = true);
 #ifdef __unix__
@@ -462,10 +471,14 @@ private slots:
     void OnEmulationStopped();
     void OnEmulationStopTimeExpired();
     void OnEmulationStopTimeout();
+    /// True while the emulation thread's teardown still makes progress (Common::ShutdownProgress
+    /// moved since the last call), for at most MaxEmuThreadShutdownMs after it was asked to stop.
+    bool EmulationShutdownProgressing();
 
 #ifdef ENABLE_UPDATE_CHECKER
     void OnEmulatorUpdateAvailable();
 #endif
+    void KeepNextendoSessionAlive();
 
 private:
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
@@ -536,7 +549,12 @@ private:
     LoadingScreen* loading_screen = nullptr;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
+    QElapsedTimer emu_force_stop_clock;
+    u64 shutdown_progress_seen{};
+    QTimer nextendo_session_timer;
+    QFutureWatcher<bool> nextendo_session_watcher;
     OverlayDialog* shutdown_dialog{};
+    BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
 #ifdef HAS_RESHADE
     ConfigurePostProcessing* post_processing_dialog = nullptr;
@@ -549,6 +567,7 @@ private:
     // Status bar elements
     QLabel* message_label = nullptr;
     QLabel* shader_building_label = nullptr;
+    QLabel* shader_prepare_label = nullptr;
     QLabel* res_scale_label = nullptr;
     QLabel* emu_speed_label = nullptr;
     QLabel* game_fps_label = nullptr;
@@ -582,7 +601,7 @@ private:
     UserDataMigrator user_data_migrator;
     std::unique_ptr<QtConfig> config;
 
-    // Whether emulation is currently running in yuzu.
+    // Whether emulation is currently running in Lichii.
     bool emulation_running = false;
     std::optional<CompatibilityReporting::Session> report_session;
     bool boot_in_progress = false;

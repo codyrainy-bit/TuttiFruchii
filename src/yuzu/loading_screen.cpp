@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <QBuffer>
@@ -9,6 +8,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QIODevice>
 #include <QImage>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
 #include <QPropertyAnimation>
@@ -17,14 +17,15 @@
 #include "common/container/unordered_map.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/loader/loader.h"
+#include "qt_common/config/shared_translation.h"
 #include "ui_loading_screen.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
-#include "yuzu/loading_screen.h"
+#include "lichii/loading_screen.h"
 
 // Mingw seems to not have QMovie at all. If QMovie is missing then use a single frame instead of an
 // showing the full animation
-#if !YUZU_QT_MOVIE_MISSING
+#if !LICHII_QT_MOVIE_MISSING
 #include <QMovie>
 #endif
 
@@ -97,14 +98,17 @@ LoadingScreen::LoadingScreen(QWidget* parent)
     connect(this, &LoadingScreen::LoadProgress, this, &LoadingScreen::OnLoadProgress,
             Qt::QueuedConnection);
 
-    // Shown while shaders are precached: starts the game without waiting for the rest.
+    // Shown while shaders are precached or precompiled shaders are prepared: starts the game
+    // without waiting for the rest. Its tooltip is set per stage (OnLoadProgress).
     skip_button = new QPushButton(tr("Skip"), this);
     skip_button->setStyleSheet(QString::fromUtf8(SKIP_BUTTON_STYLE));
-    skip_button->setToolTip(tr("Start the game now. The shaders not precached yet are precached "
-                               "on a later launch."));
     skip_button->hide();
     ui->verticalLayout->insertWidget(2, skip_button, 0, Qt::AlignHCenter | Qt::AlignTop);
     connect(skip_button, &QPushButton::clicked, this, [this] {
+        if (previous_stage == VideoCore::LoadCallbackStage::Precompiled) {
+            ConfirmSkipPreparation();
+            return;
+        }
         VideoCommon::ShaderWarm::RequestSkipWarm();
         skip_button->setEnabled(false);
     });
@@ -115,12 +119,14 @@ LoadingScreen::LoadingScreen(QWidget* parent)
         {VideoCore::LoadCallbackStage::Build, tr("Loading Shaders %1 / %2")},
         {VideoCore::LoadCallbackStage::Complete, tr("Launching...")},
         {VideoCore::LoadCallbackStage::Warm, tr("Precaching shaders %1 / %2")},
+        {VideoCore::LoadCallbackStage::Precompiled, tr("Preparing shaders %1 / %2")},
     };
     progressbar_style = {
         {VideoCore::LoadCallbackStage::Prepare, PROGRESSBAR_STYLE_PREPARE},
         {VideoCore::LoadCallbackStage::Build, PROGRESSBAR_STYLE_BUILD},
         {VideoCore::LoadCallbackStage::Complete, PROGRESSBAR_STYLE_COMPLETE},
         {VideoCore::LoadCallbackStage::Warm, PROGRESSBAR_STYLE_BUILD},
+        {VideoCore::LoadCallbackStage::Precompiled, PROGRESSBAR_STYLE_BUILD},
     };
 }
 
@@ -129,7 +135,7 @@ LoadingScreen::~LoadingScreen() = default;
 void LoadingScreen::Prepare(Loader::AppLoader& loader) {
     std::vector<u8> buffer;
     if (loader.ReadBanner(buffer) == Loader::ResultStatus::Success) {
-#ifdef YUZU_QT_MOVIE_MISSING
+#ifdef LICHII_QT_MOVIE_MISSING
         QPixmap map;
         map.loadFromData(buffer.data(), buffer.size());
         ui->banner->setPixmap(map);
@@ -171,9 +177,20 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
         } else {
             ui->progress_bar->show();
         }
-        skip_button->setVisible(stage == VideoCore::LoadCallbackStage::Warm);
+        skip_button->setVisible(stage == VideoCore::LoadCallbackStage::Warm ||
+                                stage == VideoCore::LoadCallbackStage::Precompiled);
         skip_button->setEnabled(true);
+        skip_button->setToolTip(
+            stage == VideoCore::LoadCallbackStage::Precompiled
+                ? tr("Start the game now. What is already prepared is kept, and the rest can be "
+                     "prepared in the background while you play.")
+                : tr("Start the game now. The shaders not precached yet are precached on a later "
+                     "launch."));
         previous_stage = stage;
+        // Preparation can finish while its confirmation is still open.
+        if (skip_confirm) {
+            skip_confirm->close();
+        }
         // reset back to fast shader compiling since the stage changed
         slow_shader_compile_start = false;
     }
@@ -211,7 +228,8 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
 
     // update labels and progress bar
     if (stage == VideoCore::LoadCallbackStage::Build ||
-        stage == VideoCore::LoadCallbackStage::Warm) {
+        stage == VideoCore::LoadCallbackStage::Warm ||
+        stage == VideoCore::LoadCallbackStage::Precompiled) {
         ui->stage->setText(stage_translations[stage].arg(value).arg(total));
     } else {
         ui->stage->setText(stage_translations[stage]);
@@ -219,6 +237,44 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     ui->value->setText(estimate);
     ui->progress_bar->setValue(static_cast<int>(value));
     previous_time = now;
+}
+
+void LoadingScreen::ConfirmSkipPreparation() {
+    if (skip_confirm) {
+        return;
+    }
+    using VideoCommon::ShaderWarm::PrepareSkip;
+    // On the main window: the loading screen's style sheet would otherwise apply to the dialog.
+    auto* const box = new QMessageBox(
+        QMessageBox::Warning, tr("Skip Shader Preparation?"),
+        tr("The game can start right away. Until all shaders are prepared, expect more "
+           "shader compilation stutter, because shaders that aren't ready are compiled as the "
+           "game first uses them.\n\nCompile in background: the rest is prepared on a few "
+           "shader threads while you play, which can take a long while.\nSkip: nothing more is "
+           "prepared until the next launch.\n\nEither way, what is already prepared is kept, "
+           "and a later launch continues where this one stops. %1")
+            .arg(ConfigurationShared::PrecompiledPrepareRerunCauses()),
+        QMessageBox::NoButton, window());
+    QPushButton* const background =
+        box->addButton(tr("Compile in background"), QMessageBox::AcceptRole);
+    QPushButton* const session = box->addButton(tr("Skip"), QMessageBox::DestructiveRole);
+    QPushButton* const cancel = box->addButton(QMessageBox::Cancel);
+    box->setDefaultButton(cancel);
+    box->setEscapeButton(cancel);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    connect(box, &QMessageBox::buttonClicked, this,
+            [this, background, session](QAbstractButton* button) {
+                if (previous_stage != VideoCore::LoadCallbackStage::Precompiled) {
+                    return;
+                }
+                if (button == background || button == session) {
+                    VideoCommon::ShaderWarm::RequestSkipPreparation(
+                        button == background ? PrepareSkip::Background : PrepareSkip::Session);
+                    skip_button->setEnabled(false);
+                }
+            });
+    skip_confirm = box;
+    box->open();
 }
 
 void LoadingScreen::paintEvent(QPaintEvent* event) {
@@ -230,7 +286,7 @@ void LoadingScreen::paintEvent(QPaintEvent* event) {
 }
 
 void LoadingScreen::Clear() {
-#ifndef YUZU_QT_MOVIE_MISSING
+#ifndef LICHII_QT_MOVIE_MISSING
     animation.reset();
     backing_buf.reset();
     backing_mem.reset();

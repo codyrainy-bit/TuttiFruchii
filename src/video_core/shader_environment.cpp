@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -48,6 +47,8 @@
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
+#include "shader_recompiler/byte_addressed_image.h"
+#include "video_core/surface.h"
 
 namespace VideoCommon {
 
@@ -97,6 +98,11 @@ static constexpr u64 MakeCbufKey(u32 index, u32 offset) {
 // environment of a record, the EnvironmentReadProperties of the host that made it. Older builds
 // load it as one more value.
 constexpr u64 READ_PROPERTIES_KEY{MakeCbufKey(~0U, 0)};
+
+// Another such value: present in records whose texture types were read as ReadTextureInfo reads
+// an empty descriptor now (a 2D texture). Records without it can hold a 1D type for the null
+// texture at handle 0 (issue #846).
+constexpr u64 NULL_TEXTURE_2D_KEY{MakeCbufKey(~0U, 1)};
 
 // The most values of a kind an environment of a record holds. Translation reads a few hundred at
 // most; a damaged count can't make a load allocate more than a few MB for them.
@@ -339,9 +345,9 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
-    // The read properties are one more constant buffer value.
+    // The read properties and the null texture marker are two more constant buffer values.
     return !has_unbound_instructions &&
-           std::max({texture_types.size(), texture_pixel_formats.size(), cbuf_values.size() + 1,
+           std::max({texture_types.size(), texture_pixel_formats.size(), cbuf_values.size() + 2,
                      storage_pointer_types.size(), cbuf_replacements.size()}) <=
                MAX_RECORDED_VALUES;
 }
@@ -369,7 +375,7 @@ void GenericEnvironment::Serialize(std::ostream& file, u32 read_properties) cons
     const u64 code_size{static_cast<u64>(CachedSizeBytes())};
     const u64 num_texture_types{static_cast<u64>(texture_types.size())};
     const u64 num_texture_pixel_formats{static_cast<u64>(texture_pixel_formats.size())};
-    const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size()) + 1};
+    const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size()) + 2};
     const u64 num_storage_pointer_types{static_cast<u64>(storage_pointer_types.size())};
     const u64 num_cbuf_replacement_values{static_cast<u64>(cbuf_replacements.size())};
 
@@ -403,8 +409,11 @@ void GenericEnvironment::Serialize(std::ostream& file, u32 read_properties) cons
         file.write(reinterpret_cast<const char*>(&key), sizeof(key))
             .write(reinterpret_cast<const char*>(&type), sizeof(type));
     }
+    constexpr u32 null_texture_2d{1};
     file.write(reinterpret_cast<const char*>(&READ_PROPERTIES_KEY), sizeof(READ_PROPERTIES_KEY))
-        .write(reinterpret_cast<const char*>(&read_properties), sizeof(read_properties));
+        .write(reinterpret_cast<const char*>(&read_properties), sizeof(read_properties))
+        .write(reinterpret_cast<const char*>(&NULL_TEXTURE_2D_KEY), sizeof(NULL_TEXTURE_2D_KEY))
+        .write(reinterpret_cast<const char*>(&null_texture_2d), sizeof(null_texture_2d));
     for (const auto& [key, type] : storage_pointer_types) {
         file.write(reinterpret_cast<const char*>(&key), sizeof(key))
             .write(reinterpret_cast<const char*>(&type), sizeof(type));
@@ -469,6 +478,16 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
     Tegra::Texture::TICEntry entry;
+    const auto null_2d_texture = [&entry] {
+        entry.raw.fill(0);
+        entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+        entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+        entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+        entry.normalized_coords.Assign(1);
+    };
     if (index > tic_limit) {
         // Past the pool, the bytes are not a descriptor: reading them gave the shader a random
         // texture type and format (garbage-format asserts, then crashes and device losses on AMD
@@ -480,18 +499,29 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                                 "(index {} > limit {}); using a null 2D texture",
                         raw, index, tic_limit);
         }
-        entry.raw.fill(0);
-        entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
-        entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
-        entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
-        entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
-        entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
-        entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
-        entry.normalized_coords.Assign(1);
+        null_2d_texture();
         return entry;
     }
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
+<<<<<<< C:\Users\Administrator\AppData\Local\Temp\opencode\m3\ours.txt
     gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
+=======
+    if (texture_pool_flushed) {
+        gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
+    } else {
+        gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
+    }
+    if (entry.raw == decltype(entry.raw){}) {
+        // An empty descriptor (the null texture, handle 0 in NVN games): a game can draw with it
+        // before it assigns the real texture, and the shader built for that draw is kept for the
+        // pipeline. Read as it is, the zeroes say "1D texture", so a size query of a texture that
+        // turns out 2D (it has no type of its own) got a null 1D view for good: Pokemon Legends
+        // Z-A's tonemap then samples one texel for the whole screen (issue #846). Compile for a
+        // plain 2D RGBA8 texture instead, as for an index past the pool.
+        null_2d_texture();
+        return entry;
+    }
+>>>>>>> C:\Users\Administrator\AppData\Local\Temp\opencode\m3\t.txt
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
         std::getenv("EDEN_NX2_RENDER_TRACE")) {
         static std::atomic<u32> traces{};
@@ -1240,6 +1270,20 @@ void FileEnvironment::Deserialize(std::istream& file, std::streampos end) {
         recorded_read_properties = it->second;
         cbuf_values.erase(it);
     }
+    if (const auto it{cbuf_values.find(NULL_TEXTURE_2D_KEY)}; it != cbuf_values.end()) {
+        cbuf_values.erase(it);
+    } else {
+        // An older build read every empty descriptor as 1D (issue #846), whatever its index, or
+        // the game binds a real 1D texture there: the record can't tell. Drop every 1D type, so
+        // that the pipeline is built again from the game (LacksRecordedValue).
+        for (auto it{texture_types.begin()}; it != texture_types.end();) {
+            if (it->second == Shader::TextureType::Color1D) {
+                it = texture_types.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     for (size_t i = 0; i < num_storage_pointer_types; ++i) {
         u64 key;
         u8 value;
@@ -1282,6 +1326,116 @@ size_t FileEnvironment::MemorySize() const {
     return sizeof(*this) + code.capacity() * sizeof(u64) + map_bytes(texture_types) +
            map_bytes(texture_pixel_formats) + map_bytes(cbuf_values) +
            map_bytes(storage_pointer_types) + map_bytes(cbuf_replacements);
+}
+
+namespace {
+/// What translation uses of a pixel format (texture_pass.cpp): whether it is an integer format,
+/// R16_FLOAT and the byte-addressed 32-bit color formats (byte-addressed image stores), the snorm
+/// formats (texel fetch patching without snorm render buffers).
+u32 PixelFormatTraits(Shader::TexturePixelFormat format) {
+    using F = Shader::TexturePixelFormat;
+    const bool snorm = format == F::A8B8G8R8_SNORM || format == F::R8G8_SNORM ||
+                       format == F::R8_SNORM || format == F::R16G16B16A16_SNORM ||
+                       format == F::R16G16_SNORM || format == F::R16_SNORM;
+    return (VideoCore::Surface::IsPixelFormatInteger(
+                static_cast<VideoCore::Surface::PixelFormat>(format))
+                ? 1U
+                : 0U) |
+           (format == F::R16_FLOAT ? 2U : 0U) |
+           (Shader::IsByteAddressed32BitColorFormat(format) ? 4U : 0U) | (snorm ? 8U : 0U);
+}
+} // Anonymous namespace
+
+bool FileEnvironment::AnswersHoldFor(Shader::Environment& live, const char** why,
+                                     u32 format_traits) {
+    const auto fail = [why](const char* reason) {
+        if (why) {
+            *why = reason;
+        }
+        return false;
+    };
+    if (live.ShaderStage() != stage || live.StartAddress() != start_address ||
+        live.LocalMemorySize() != local_memory_size) {
+        return fail("program");
+    }
+    // Only a vertex program asks (PositionPass).
+    if (stage == Shader::Stage::VertexB &&
+        live.ReadViewportTransformState() != viewport_transform_state) {
+        return fail("viewport transform");
+    }
+    // Handles of non-bindless textures are read from this constant buffer.
+    if (live.TextureBoundBuffer() != texture_bound) {
+        return fail("texture bound buffer");
+    }
+    // A passthrough geometry program passes the attributes this mask does not skip.
+    if (stage == Shader::Stage::Geometry && live.GpPassthroughMask() != gp_passthrough_mask) {
+        return fail("geometry passthrough mask");
+    }
+    // HLE replacements are asked for every constant buffer read when there are any.
+    if (live.HasHLEMacroState() || HasHLEMacroState()) {
+        return fail("HLE constant replacements");
+    }
+    const auto is_pointer_word = [&](u64 key) {
+        const u32 index = static_cast<u32>(key >> 32);
+        const u32 offset = static_cast<u32>(key);
+        return storage_pointer_types.contains(MakeCbufKey(index, offset)) ||
+               (offset >= 4 && storage_pointer_types.contains(MakeCbufKey(index, offset - 4)));
+    };
+    std::vector<u32> handles_read;
+    for (const auto& [key, value] : cbuf_values) {
+        const u32 index = static_cast<u32>(key >> 32);
+        const u32 offset = static_cast<u32>(key);
+        const u32 live_value = live.ReadCbufValue(index, offset);
+        const auto type = texture_types.find(value);
+        const auto format = texture_pixel_formats.find(value);
+        if (type != texture_types.end() || format != texture_pixel_formats.end()) {
+            // A texture handle. Asked of `live` even when it is the same value, so `live` holds
+            // the answers its translation would have asked for (it is what the disk cache keeps).
+            if (type != texture_types.end() && live.ReadTextureType(live_value) != type->second) {
+                return fail("texture type");
+            }
+            if (format != texture_pixel_formats.end() &&
+                ((PixelFormatTraits(live.ReadTexturePixelFormat(live_value)) ^
+                  PixelFormatTraits(format->second)) &
+                 format_traits) != 0) {
+                return fail("texture pixel format");
+            }
+            handles_read.push_back(value);
+            continue;
+        }
+        if (live_value != value && !is_pointer_word(key)) {
+            return fail("constant buffer value");
+        }
+    }
+    const auto read_from_cbuf = [&](u32 handle) {
+        return std::ranges::find(handles_read, handle) != handles_read.end();
+    };
+    // Handles not read from a constant buffer (or built from several words): asked as they are.
+    for (const auto& [handle, type] : texture_types) {
+        if (!read_from_cbuf(handle) && live.ReadTextureType(handle) != type) {
+            return fail("texture type");
+        }
+    }
+    for (const auto& [handle, format] : texture_pixel_formats) {
+        if (!read_from_cbuf(handle) &&
+            ((PixelFormatTraits(live.ReadTexturePixelFormat(handle)) ^ PixelFormatTraits(format)) &
+             format_traits) != 0) {
+            return fail("texture pixel format");
+        }
+    }
+    for (const auto& [key, mapped] : storage_pointer_types) {
+        const u32 index = static_cast<u32>((key >> 32) & ((key >> 63) != 0 ? 0xff : 0xffffffff));
+        const u32 offset = static_cast<u32>(key);
+        const bool live_mapped =
+            (key >> 63) != 0
+                ? live.IsCbufIndirectStorageBufferPointer(index, offset,
+                                                          static_cast<u32>((key >> 40) & 0x3fffff))
+                : live.IsCbufStorageBufferPointer(index, offset);
+        if (live_mapped != (mapped != 0)) {
+            return fail("storage buffer pointer");
+        }
+    }
+    return true;
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {

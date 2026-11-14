@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <functional>
 #include <utility>
 
 #include <QAbstractItemView>
@@ -30,7 +31,7 @@
 #include "core/core.h"
 #include "core/file_sys/nup_writer.h"
 #ifdef LICHII_NX_TOOLS
-#include "yuzu/nx_tools.h"
+#include "lichii/nx_tools.h"
 #endif
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
@@ -39,15 +40,15 @@
 #include "qt_common/game_list/model.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
-#include "yuzu/game/carousel.h"
-#include "yuzu/game/game_grid.h"
-#include "yuzu/game/game_list.h"
-#include "yuzu/game/game_tree.h"
-#include "yuzu/game/search_field.h"
-#include "yuzu/main_window.h"
-#include "yuzu/shader_warm_dialog.h"
-#include "yuzu/util/controller_navigation.h"
-#include "yuzu/util/util.h"
+#include "lichii/game/carousel.h"
+#include "lichii/game/game_grid.h"
+#include "lichii/game/game_list.h"
+#include "lichii/game/game_tree.h"
+#include "lichii/game/search_field.h"
+#include "lichii/main_window.h"
+#include "lichii/shader_warm_dialog.h"
+#include "lichii/util/controller_navigation.h"
+#include "lichii/util/util.h"
 
 GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvider* provider_,
                    PlayTime::PlayTimeManager& play_time_manager_, Core::System& system_,
@@ -367,6 +368,54 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     emit PopulatingCompleted();
 }
 
+void GameList::SetGameTitle(u64 program_id, const QString& title) {
+    if (program_id == 0 || title.isEmpty()) {
+        return;
+    }
+    // Favorites are plain copies of a library entry that store their shown text, so they take it
+    // from an updated library entry afterwards.
+    QList<QStandardItem*> copies;
+    QVariant display;
+    QVariant sort;
+    const std::function<void(QStandardItem*)> visit = [&](QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount(); ++row) {
+            QStandardItem* item = parent->child(row);
+            if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                GameListItemType::Game) {
+                if (item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
+                    item->setData(title, GameListItemPath::TitleRole);
+                    // A copy is a plain item: only library entries report the game type.
+                    if (item->type() != static_cast<int>(GameListItemType::Game)) {
+                        copies.append(item);
+                    } else if (!display.isValid()) {
+                        display = item->data(Qt::DisplayRole);
+                        sort = item->data(GameListItem::SortRole);
+                    }
+                }
+            } else {
+                visit(item);
+            }
+        }
+    };
+    visit(item_model->invisibleRootItem());
+    if (display.isValid()) {
+        for (QStandardItem* copy : copies) {
+            copy->setData(display, Qt::DisplayRole);
+            copy->setData(sort, GameListItem::SortRole);
+        }
+    }
+    // A list sorted by name puts the renamed game in its new place. This only reorders the rows
+    // already shown: no rescan.
+    if (display.isValid() || !copies.isEmpty()) {
+        item_model->sort(tree_view->header()->sortIndicatorSection(),
+                         tree_view->header()->sortIndicatorOrder());
+    }
+    // A new name can match the search text, or stop matching it.
+    if (!search_field->filterText().isEmpty()) {
+        OnTextChanged(search_field->filterText());
+    }
+}
+
 void GameList::RefreshGameDirectory() {
     item_model->RefreshGameDirectory();
 }
@@ -501,6 +550,8 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     if (has_shader_warm) {
         delete_shader_warm = context_menu.addAction(tr("Delete Shader Precache"));
     }
+    QAction* build_from_play =
+        context_menu.addAction(tr("Build Precompiled Shaders from My Play..."));
     QAction* ryujinx = context_menu.addAction(tr("Link to Ryujinx"));
     context_menu.addSeparator();
     QMenu* remove_menu = context_menu.addMenu(tr("Remove"));
@@ -510,6 +561,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     QAction* remove_cache_storage = remove_menu->addAction(tr("Remove Cache Storage"));
     QAction* remove_gl_shader_cache = remove_menu->addAction(tr("Remove OpenGL Pipeline Cache"));
     QAction* remove_vk_shader_cache = remove_menu->addAction(tr("Remove Vulkan Pipeline Cache"));
+    QAction* remove_shader_preparation = remove_menu->addAction(tr("Remove Shader Preparation"));
     remove_menu->addSeparator();
     QAction* remove_shader_cache = remove_menu->addAction(tr("Remove All Pipeline Caches"));
     QAction* remove_all_content = remove_menu->addAction(tr("Remove All Installed Contents"));
@@ -571,7 +623,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     }
     QAction* properties = context_menu.addAction(tr("Configure Game"));
     if (program_id != 0 && program_id == reportable_program_id) {
-        auto* report = context_menu.addAction(tr("Submit compatibility report…"));
+        auto* report = context_menu.addAction(tr("Submit compatibility reportΓÇª"));
         connect(report, &QAction::triggered, this,
                 [this, program_id] { emit ReportCompatibilityRequested(program_id); });
     }
@@ -611,10 +663,12 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     open_mod_location->setVisible(program_id != 0);
     open_transferable_shader_cache->setVisible(program_id != 0);
     prepare_shaders->setVisible(program_id != 0);
+    build_from_play->setVisible(program_id != 0);
     remove_update->setVisible(program_id != 0);
     remove_dlc->setVisible(program_id != 0);
     remove_gl_shader_cache->setVisible(program_id != 0);
     remove_vk_shader_cache->setVisible(program_id != 0);
+    remove_shader_preparation->setVisible(program_id != 0);
     remove_shader_cache->setVisible(program_id != 0);
     remove_all_content->setVisible(program_id != 0);
 
@@ -638,6 +692,9 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         connect(delete_shader_warm, &QAction::triggered, this,
                 [this, program_id]() { emit DeleteShaderWarmRequested(program_id); });
     }
+    connect(build_from_play, &QAction::triggered, this, [this, program_id, path]() {
+        emit BuildPrecompiledFromPlayRequested(program_id, path);
+    });
     connect(remove_all_content, &QAction::triggered, this, [this, program_id]() {
         emit RemoveInstalledEntryRequested(program_id, QtCommon::Game::InstalledEntryType::Game);
     });
@@ -655,6 +712,10 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     connect(remove_vk_shader_cache, &QAction::triggered, this, [this, program_id, path]() {
         emit RemoveFileRequested(program_id, QtCommon::Game::GameListRemoveTarget::VkShaderCache,
                                  path);
+    });
+    connect(remove_shader_preparation, &QAction::triggered, this, [this, program_id, path]() {
+        emit RemoveFileRequested(program_id,
+                                 QtCommon::Game::GameListRemoveTarget::ShaderPreparation, path);
     });
     connect(remove_shader_cache, &QAction::triggered, this, [this, program_id, path]() {
         emit RemoveFileRequested(program_id, QtCommon::Game::GameListRemoveTarget::AllShaderCache,

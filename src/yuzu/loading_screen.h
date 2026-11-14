@@ -1,19 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <chrono>
 #include <memory>
+#include <QPointer>
 #include <QString>
 #include <QWidget>
 #include <QtGlobal>
 
 #if !QT_CONFIG(movie)
-#define YUZU_QT_MOVIE_MISSING 1
+#define LICHII_QT_MOVIE_MISSING 1
 #endif
 
 namespace Loader {
@@ -33,6 +33,7 @@ class QByteArray;
 class QGraphicsOpacityEffect;
 class QMovie;
 class QPropertyAnimation;
+class QMessageBox;
 class QPushButton;
 
 class LoadingScreen : public QWidget {
@@ -68,7 +69,7 @@ signals:
     void Hidden();
 
 private:
-#ifndef YUZU_QT_MOVIE_MISSING
+#ifndef LICHII_QT_MOVIE_MISSING
     std::unique_ptr<QMovie> animation;
     std::unique_ptr<QBuffer> backing_buf;
     std::unique_ptr<QByteArray> backing_mem;
@@ -78,7 +79,10 @@ private:
     VideoCore::LoadCallbackStage previous_stage;
 
     QGraphicsOpacityEffect* opacity_effect = nullptr;
+    void ConfirmSkipPreparation();
+
     QPushButton* skip_button = nullptr;
+    QPointer<QMessageBox> skip_confirm;
     std::unique_ptr<QPropertyAnimation> fadeout_animation;
 
     // Definitions for the differences in text and styling for each stage

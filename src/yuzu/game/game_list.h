@@ -93,6 +93,8 @@ public slots:
     void SetNupConversionRunning(bool running);
     void SetNxToolRunning(bool running);
     void RefreshGameDirectory();
+    /// Shows a new name for every library entry of the program, without a rescan.
+    void SetGameTitle(u64 program_id, const QString& title);
     void RefreshExternalContent();
     void UpdateIconSizes();
     void OnPopulate();
@@ -106,6 +108,7 @@ signals:
     void OpenTransferableShaderCacheRequested(u64 program_id);
     void PrepareShaderWarmRequested(u64 program_id, const std::string& game_path);
     void DeleteShaderWarmRequested(u64 program_id);
+    void BuildPrecompiledFromPlayRequested(u64 program_id, const std::string& game_path);
     void RemoveInstalledEntryRequested(u64 program_id, QtCommon::Game::InstalledEntryType type);
     void RemoveFileRequested(u64 program_id, QtCommon::Game::GameListRemoveTarget target,
                              const std::string& game_path);

@@ -4,7 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 Torzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -144,6 +143,7 @@ ENUM(CpuAccuracy, Auto, Accurate, Unsafe, Paranoid, Debugging);
 ENUM(CpuClock, Normal, Boost, Overclock)
 ENUM(NativeAsyncDraws, Wait, Bounded, Skip);
 ENUM(PrecacheShaders, Off, Ask, Always);
+ENUM(PrecompiledPrepare, WhilePlaying, BeforeStart, Never);
 ENUM(MemoryLayout, Memory_4Gb, Memory_6Gb, Memory_8Gb, Memory_10Gb, Memory_12Gb);
 ENUM(ConfirmStop, Ask_Always, Ask_Based_On_Game, Ask_Never);
 ENUM(FullscreenMode, Borderless, Exclusive);
@@ -169,7 +169,7 @@ ENUM(ExtendedDynamicState, Disabled, EDS1, EDS2, EDS3);
 ENUM(GpuLogLevel, Off, Errors, Standard, Verbose, All)
 ENUM(GameListMode, TreeView, GridView, CarouselView);
 ENUM(SpeedMode, Standard, Turbo, Slow);
-ENUM(FrameGenType, Lsfg, Fsr3);
+ENUM(FrameGenType, Lsfg, Fsr3, NvidiaDlssG);
 
 template <typename Type>
 inline std::string_view CanonicalizeEnum(Type id) {
