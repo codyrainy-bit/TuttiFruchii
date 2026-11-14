@@ -45,6 +45,25 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Lowered code of a native program, reused when its pipelines are built.
     std::shared_ptr<const LoweredNativeCode> lowered_native;
+    /// Native vertex programs: the generic attributes their header says they read.
+    u32 generic_read_mask{~0U};
+};
+
+/// Generic attributes a vertex program's header says it reads (any component of each).
+u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept;
+
+/// A program of the current draw or dispatch, read back from GPU memory for a frame dump.
+struct CapturedProgram {
+    /// Maxwell program slot, or 6 for compute
+    u32 slot{};
+    u64 unique_hash{};
+    /// NativeProgramKey of a native program, 0 for a guest Maxwell program
+    u64 native_key{};
+    GPUVAddr address{};
+    /// The 128-byte header of a native graphics program, empty otherwise (a Maxwell program's
+    /// header is the start of its code)
+    std::vector<u8> header;
+    std::vector<u8> code;
 };
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {

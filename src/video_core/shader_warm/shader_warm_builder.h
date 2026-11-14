@@ -110,6 +110,19 @@ std::unordered_set<u64> ReadPrecachedPipelines(const std::filesystem::path& file
 /// Writes `hashes` for `stamp` to `file`. Returns false when it cannot be written.
 bool WritePrecachedPipelines(const std::filesystem::path& file, const DriverStamp& stamp,
                              const std::unordered_set<u64>& hashes);
+/// Skip button of the precompiled pipelines' preparation: it stops after its current builds and the game starts,
+/// and a later launch prepares from the start. Taken (and cleared) by the renderer.
+void RequestSkipRecipe();
+bool TakeSkipRecipe();
+
+/// Progress of the precompiled pipelines' preparation while the game runs, for the status bar:
+/// records done (prepared, failed or skipped) of `total`. Total 0: none is running.
+struct RecipeProgress {
+    u64 done{};
+    u64 total{};
+};
+void SetRecipeProgress(u64 done, u64 total);
+RecipeProgress GetRecipeProgress();
 
 /// Removes the title's precache file, its marker and count, the list of precached graphics
 /// pipelines and a leftover temporary file (rebuild or delete from the UI). Returns false when a file exists but cannot be removed, with

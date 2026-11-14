@@ -424,6 +424,20 @@ public:
     /// resolves only their descriptors' views. Returns how many views it resolved (0 when none
     /// changed), or nothing when the draw must resolve in full.
     std::optional<u32> RetextureComputed();
+    /// The shader info of a pipeline stage (vertex B to fragment), null for a stage it lacks.
+    [[nodiscard]] const Shader::Info* StageInfo(size_t stage) const noexcept {
+        return stage_present[stage] ? &stage_infos[stage] : nullptr;
+    }
+
+    /// Built from a precompiled pipeline's recorded environments and shader infos (see
+    /// PipelineCache::CreatePrecompiledGraphicsPipeline): a failed build is replaced by a
+    /// pipeline translated from the game's state.
+    void MarkPrecompiled() noexcept {
+        precompiled = true;
+    }
+    [[nodiscard]] bool IsPrecompiled() const noexcept {
+        return precompiled;
+    }
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
@@ -481,6 +495,8 @@ private:
     /// Stages with a shader, and whether a handle is computed at draw time (SharesDeltaStateWith).
     std::array<bool, NUM_STAGES> stage_enabled{};
     bool has_computed_handles{};
+    std::array<bool, NUM_STAGES> stage_present{};
+    bool precompiled{};
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
