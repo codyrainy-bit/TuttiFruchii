@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -22,6 +21,7 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "shader_recompiler/translate_profile.h"
 
 namespace Shader::Maxwell {
 namespace {
@@ -365,15 +365,60 @@ void TightenOutputVertices(IR::Program& program) {
 }
 } // Anonymous namespace
 
+void TrimGeometryPassthrough(IR::Program& program, const VaryingState& previous_stores) {
+    if (!program.is_geometry_passthrough) {
+        return;
+    }
+    std::bitset<32> dropped;
+    for (u32 j = 0; j < 32; ++j) {
+        if (program.info.passthrough.Generic(j) && !previous_stores.Generic(j)) {
+            dropped.set(j);
+        }
+    }
+    if (dropped.none()) {
+        return;
+    }
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != IR::Opcode::SetAttribute) {
+                continue;
+            }
+            const IR::Attribute attr{inst.Arg(0).Attribute()};
+            if (!IR::IsGeneric(attr) || !dropped.test(IR::GenericAttributeIndex(attr))) {
+                continue;
+            }
+            inst.Invalidate();
+        }
+    }
+    for (u32 j = 0; j < 32; ++j) {
+        if (!dropped.test(j)) {
+            continue;
+        }
+        const size_t base = static_cast<size_t>(IR::Attribute::Generic0X) + j * 4;
+        for (size_t component = 0; component < 4; ++component) {
+            program.info.passthrough.mask[base + component] = false;
+            program.info.stores.mask[base + component] = false;
+        }
+    }
+}
+
 IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Block>& block_pool,
                              Environment& env, Flow::CFG& cfg, const HostTranslateInfo& host_info) {
     HostTranslateInfo normalized_host_info{host_info};
     normalized_host_info.ApplyDescriptorLimitPolicy();
 
+    using TranslateProfile::Scope;
+    using TranslateProfile::Step;
     IR::Program program;
-    program.syntax_list = BuildASL(inst_pool, block_pool, env, cfg, normalized_host_info);
-    program.blocks = GenerateBlocks(program.syntax_list);
-    program.post_order_blocks = PostOrder(program.syntax_list.front());
+    {
+        Scope scope{Step::BuildAsl};
+        program.syntax_list = BuildASL(inst_pool, block_pool, env, cfg, normalized_host_info);
+    }
+    {
+        Scope scope{Step::Blocks};
+        program.blocks = GenerateBlocks(program.syntax_list);
+        program.post_order_blocks = PostOrder(program.syntax_list.front());
+    }
     program.stage = env.ShaderStage();
     program.local_memory_size = env.LocalMemorySize();
     switch (program.stage) {
@@ -391,10 +436,27 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
         if (program.is_geometry_passthrough) {
             const auto& mask{env.GpPassthroughMask()};
             for (size_t i = 0; i < mask.size() * 32; ++i) {
-                program.info.passthrough.mask[i] = ((mask[i / 32] >> (i % 32)) & 1) == 0;
+                // Only position and the generics can pass through: the skip mask covers every
+                // attribute word, and a cleared register (Donkey Kong Bananza leaves it at 0) would
+                // otherwise declare vertex/instance ids, front face, point coords and tess coords
+                // as geometry inputs (invalid SPIR-V that crashes the AMD driver).
+                const auto attribute = static_cast<IR::Attribute>(i);
+                const bool allowed = (attribute >= IR::Attribute::PositionX &&
+                                      attribute <= IR::Attribute::PositionW) ||
+                                     IR::IsGeneric(attribute);
+                program.info.passthrough.mask[i] = allowed && ((mask[i / 32] >> (i % 32)) & 1) == 0;
             }
 
             if (!normalized_host_info.support_geometry_shader_passthrough) {
+                // The lowered shader copies only Position and the generics; the mask's other
+                // bits (InstanceId, VertexId, FrontFace...) would declare stage inputs a geometry
+                // shader can't have, BaseInstance without DrawParameters among them.
+                for (size_t i = 0; i < program.info.passthrough.mask.size(); ++i) {
+                    if (i < static_cast<size_t>(IR::Attribute::PositionX) ||
+                        i > static_cast<size_t>(IR::Attribute::Generic31W)) {
+                        program.info.passthrough.mask[i] = false;
+                    }
+                }
                 program.output_vertices = GetOutputTopologyVertices(program.output_topology);
                 LowerGeometryPassthrough(program, normalized_host_info);
             }
@@ -433,9 +495,13 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     default:
         break;
     }
-    RemoveUnreachableBlocks(program);
+    {
+        Scope scope{Step::RemoveUnreachable};
+        RemoveUnreachableBlocks(program);
+    }
 
     // Replace instructions before the SSA rewrite
+    std::optional<Scope> lower_scope{std::in_place, Step::LowerTypes};
     if (!normalized_host_info.support_float64) {
         Optimization::LowerFp64ToFp32(program);
     }
@@ -448,26 +514,37 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     if (!normalized_host_info.support_conditional_barrier) {
         Optimization::ConditionalBarrierPass(program);
     }
-    Optimization::SsaRewritePass(program);
+    lower_scope.reset();
+    // Each pass, timed when the translation profile is on.
+    const auto pass = [](Step step, auto&& run) {
+        Scope scope{step};
+        run();
+    };
+    pass(Step::SsaRewrite, [&] { Optimization::SsaRewritePass(program); });
 
-    Optimization::ConstantPropagationPass(env, program);
+    pass(Step::ConstantPropagation, [&] { Optimization::ConstantPropagationPass(env, program); });
 
-    Optimization::PositionPass(env, program);
-    Optimization::BlitConstantsPass(env, program);
+    pass(Step::Position, [&] { Optimization::PositionPass(env, program); });
+    pass(Step::BlitConstants, [&] { Optimization::BlitConstantsPass(env, program); });
 
-    Optimization::GlobalMemoryToStorageBufferPass(env, program, normalized_host_info);
-    Optimization::GeometryCompactionPass(program, normalized_host_info);
-    Optimization::TexturePass(env, program, normalized_host_info);
+    pass(Step::GlobalMemoryToStorageBuffer, [&] {
+        Optimization::GlobalMemoryToStorageBufferPass(env, program, normalized_host_info);
+    });
+    pass(Step::GeometryCompaction,
+         [&] { Optimization::GeometryCompactionPass(program, normalized_host_info); });
+    pass(Step::Texture, [&] { Optimization::TexturePass(env, program, normalized_host_info); });
 
     if (Settings::values.resolution_info.active) {
-        Optimization::RescalingPass(program);
+        pass(Step::Rescaling, [&] { Optimization::RescalingPass(program); });
     }
-    Optimization::DeadCodeEliminationPass(program);
-    TightenOutputVertices(program);
+    pass(Step::DeadCodeElimination, [&] {
+        Optimization::DeadCodeEliminationPass(program);
+        TightenOutputVertices(program);
+    });
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(program);
     }
-    Optimization::CollectShaderInfoPass(env, program);
+    pass(Step::CollectShaderInfo, [&] { Optimization::CollectShaderInfoPass(env, program); });
     program.info.is_task = program.stage == Stage::Task;
     program.info.is_mesh = program.stage == Stage::Mesh;
     if (program.stage == Stage::Mesh) {
@@ -480,17 +557,19 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             program.info.stores.Set(static_cast<IR::Attribute>(line), true);
         }
     }
-    Optimization::LayerPass(program, normalized_host_info);
-    Optimization::VendorWorkaroundPass(program);
+    pass(Step::Layer, [&] { Optimization::LayerPass(program, normalized_host_info); });
+    pass(Step::VendorWorkaround, [&] { Optimization::VendorWorkaroundPass(program); });
 
-    CollectInterpolationInfo(env, program);
-    AddNVNStorageBuffers(program, normalized_host_info);
-    Optimization::LimitSampledTextureArrays(program, normalized_host_info);
+    pass(Step::Interpolation, [&] { CollectInterpolationInfo(env, program); });
+    pass(Step::NvnStorageBuffers, [&] { AddNVNStorageBuffers(program, normalized_host_info); });
+    pass(Step::LimitSampledTextureArrays,
+         [&] { Optimization::LimitSampledTextureArrays(program, normalized_host_info); });
     return program;
 }
 
 IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b,
                                     Environment& env_vertex_b, const HostTranslateInfo& host_info) {
+    TranslateProfile::Scope profile_scope{TranslateProfile::Step::MergeDualVertex};
     IR::Program result{};
     Optimization::VertexATransformPass(vertex_a);
     Optimization::VertexBTransformPass(vertex_b);
@@ -512,10 +591,15 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.loads.mask |= vertex_b.info.loads.mask;
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
-    Optimization::JoinTextureInfo(result.info, vertex_b.info);
-    // The two halves are one stage: their storage buffers share its limit.
-    Optimization::JoinStorageInfo(result.info, vertex_b.info,
-                                  Optimization::StorageBufferLimit(host_info));
+    // Vertex B's descriptors and storage buffers join Vertex A's, which keep their indices; its
+    // handle programs and the instructions of its blocks read them where they are here. The two
+    // halves are one stage: their storage buffers share its limit.
+    const auto storage_bindings{Optimization::JoinStorageInfo(
+        result.info, vertex_b.info, Optimization::StorageBufferLimit(host_info))};
+    const auto descriptors{
+        Optimization::JoinTextureInfo(result.info, vertex_b.info, storage_bindings)};
+    Optimization::RemapTextureDescriptors(vertex_b, descriptors);
+    Optimization::RemapStorageBindings(vertex_b, storage_bindings);
     Optimization::DeadCodeEliminationPass(result);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(result);
@@ -525,6 +609,7 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
 }
 
 void ConvertLegacyToGeneric(IR::Program& program, const Shader::RuntimeInfo& runtime_info) {
+    TranslateProfile::Scope profile_scope{TranslateProfile::Step::ConvertLegacyToGeneric};
     auto& stores = program.info.stores;
     if (stores.Legacy()) {
         std::queue<IR::Attribute> unused_output_generics{};

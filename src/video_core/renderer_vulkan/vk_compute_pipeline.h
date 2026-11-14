@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -49,7 +48,8 @@ public:
                              PipelineStatistics* pipeline_statistics,
                              VideoCore::ShaderNotify* shader_notify, const Shader::Info& info,
                              vk::ShaderModule spv_module, u64 shader_hash,
-                             std::function<vk::ShaderModule()> emit = {});
+                             std::vector<u8> kept_spirv,
+                             std::function<vk::ShaderModule(std::vector<u8>&)> emit = {});
 
     ~ComputePipeline();
 
@@ -69,6 +69,12 @@ public:
                                  BindCommand* deferred_bind = nullptr);
 
     static constexpr u64 Ocarina1440pShader = 0x6bd913e1f34e83ebULL;
+    /// The same upscale to 2560x1440 from a scene the DLSS render scale shrank (ProfessorTee's
+    /// #903).
+    static constexpr u64 Ocarina1440pScaledShader = 0x4c1ae2fe58f30a97ULL;      // menus
+    static constexpr u64 Ocarina1440pScaledFieldShader = 0x9302bc0d6d1d9bc1ULL; // gameplay
+    /// The game's 3/4 upscale, which it runs to 2560x1440 at the DLSS Performance render scale.
+    static constexpr u64 OcarinaThreeQuarterShader = 0xe40f5efb5480e692ULL;
     /// The same output pass at 1:1, run at 1920x1080 in handheld with the Max Resolution add-on.
     static constexpr u64 OcarinaFullSizeShader = 0xc033c3ddc9f0897bULL;
     [[nodiscard]] bool CanReplaceOcarinaUpscale() const;
@@ -79,6 +85,16 @@ public:
 
     [[nodiscard]] u64 ShaderHash() const noexcept {
         return shader_hash;
+    }
+
+    /// The build finished or failed, so KeptSpirv() is no longer written.
+    [[nodiscard]] bool IsBuilt() const noexcept {
+        return is_built.load(std::memory_order_acquire);
+    }
+
+    /// The SPIR-V (zstd) the pipeline was built from; read it only once IsBuilt().
+    [[nodiscard]] const std::vector<u8>& KeptSpirv() const noexcept {
+        return kept_spirv;
     }
 
     /// Storage images written by the last configured dispatch
@@ -110,6 +126,24 @@ public:
         RunBuild();
     }
 
+    [[nodiscard]] const Shader::Info& StageInfo() const noexcept {
+        return info;
+    }
+
+    /// Built from a precompiled pipeline's kept info and SPIR-V; a failed build is replaced by a
+    /// pipeline translated from the game's state.
+    void MarkPrecompiled() noexcept {
+        precompiled = true;
+    }
+    [[nodiscard]] bool IsPrecompiled() const noexcept {
+        return precompiled;
+    }
+    /// Built, and its module could not be made (its emit function threw): dispatches skip it.
+    [[nodiscard]] bool BuildFailed() const noexcept {
+        return is_built.load(std::memory_order::acquire) &&
+               build_failed.load(std::memory_order::acquire);
+    }
+
 private:
     /// Builds the pipeline once, on whichever thread gets here first.
     void RunBuild();
@@ -129,6 +163,7 @@ private:
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
 
     vk::ShaderModule spv_module;
+    std::vector<u8> kept_spirv;
     vk::DescriptorSetLayout descriptor_set_layout;
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
@@ -137,6 +172,9 @@ private:
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
+
+    bool precompiled{};
+    std::atomic_bool build_failed{false};
 
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};

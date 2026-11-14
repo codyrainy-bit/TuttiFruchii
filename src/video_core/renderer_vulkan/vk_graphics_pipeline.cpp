@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -376,6 +375,11 @@ std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
     return std::chrono::nanoseconds{hold_time_ns.exchange(0, std::memory_order::relaxed)};
 }
 
+std::pair<u64, u64> GraphicsPipeline::TakeTextureMemoCounts() noexcept {
+    return {g_memo_hits.exchange(0, std::memory_order_relaxed),
+            g_memo_misses.exchange(0, std::memory_order_relaxed)};
+}
+
 // TODO(crueter): This is the worst-formatted code I have EVER seen
 GraphicsPipeline::GraphicsPipeline(
     Scheduler& scheduler_, BufferCache& buffer_cache_, TextureCache& texture_cache_,
@@ -404,7 +408,7 @@ GraphicsPipeline::GraphicsPipeline(
             continue;
         }
         stage_infos[stage] = *info;
-        stage_enabled[stage] = true;
+        stage_present[stage] = true;
         enabled_uniform_buffer_masks[stage] = info->constant_buffer_mask;
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
         num_image_elements += Shader::NumDescriptors(info->texture_buffer_descriptors);
@@ -473,11 +477,20 @@ GraphicsPipeline::GraphicsPipeline(
         // the constant buffers bound and the data in memory then.
         const auto add = [&](const auto& desc) {
             if (desc.handle_program != ~0U) {
-                has_computed_handles = true;
                 return;
             }
-            const u32 last = ((std::max)(desc.count, 1U) - 1) << desc.size_shift;
-            add_range(desc.cbuf_index, desc.cbuf_offset, desc.cbuf_offset + last + 4);
+            // Each element's word on its own: strided arrays leave words between the handles.
+            for (u32 index = 0; index < desc.count; ++index) {
+                // Read as a storage buffer address: the texture is the null one (ConfigureImpl).
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(desc)>,
+                                             Shader::TextureDescriptor>) {
+                    if (VideoCommon::HandleIsStoragePointer(info, desc, index)) {
+                        continue;
+                    }
+                }
+                const u32 offset = desc.cbuf_offset + (index << desc.size_shift);
+                add_range(desc.cbuf_index, offset, offset + 4);
+            }
             if constexpr (requires { desc.has_secondary; }) {
                 if (desc.has_secondary) {
                     add_range(desc.secondary_cbuf_index, desc.secondary_cbuf_offset,
@@ -733,6 +746,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     boost::container::small_vector<ComputedHandle, 16> computed_handles;
+    boost::container::small_vector<u32, 64> computed_values;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
 
@@ -822,36 +836,39 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
+        const auto cbuf_address{[&cbufs](u32 cbuf) -> GPUVAddr {
+            return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address : GPUVAddr{};
+        }};
+        // Records each handle computed at draw time (ComputedHandlesChanged evaluates them again):
+        // one entry per descriptor, and its elements' values in order.
+        const auto note_computed{[&](const auto& desc, u32 element, u32 value) {
+            using Desc = std::remove_cvref_t<decltype(desc)>;
+            const auto [kind, first] = [&]() -> std::pair<ComputedHandleKind, const Desc*> {
+                if constexpr (std::is_same_v<Desc, Shader::TextureBufferDescriptor>) {
+                    return {TextureBuffer, info.texture_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::ImageBufferDescriptor>) {
+                    return {ImageBuffer, info.image_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::TextureDescriptor>) {
+                    return {Texture, info.texture_descriptors.data()};
+                } else {
+                    return {Image, info.image_descriptors.data()};
+                }
+            }();
+            if (element == 0) {
+                computed_handles.push_back({static_cast<u8>(stage), kind,
+                                            static_cast<u16>(&desc - first), 0,
+                                            static_cast<u32>(computed_values.size())});
+            }
+            ++computed_handles.back().count;
+            computed_values.push_back(value);
+        }};
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
                 const u32 value{VideoCommon::EvaluateTextureHandle(
-                    info, desc.handle_program, *gpu_memory,
-                    [&](u32 cbuf) -> GPUVAddr {
-                        return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
-                                                                          : GPUVAddr{};
-                    },
-                    device.GetStorageBufferAlignment())};
-                using Desc = std::remove_cvref_t<decltype(desc)>;
-                const auto [kind, first] = [&]() -> std::pair<ComputedHandleKind, const Desc*> {
-                    if constexpr (std::is_same_v<Desc, Shader::TextureBufferDescriptor>) {
-                        return {TextureBuffer, info.texture_buffer_descriptors.data()};
-                    } else if constexpr (std::is_same_v<Desc, Shader::ImageBufferDescriptor>) {
-                        return {ImageBuffer, info.image_buffer_descriptors.data()};
-                    } else if constexpr (std::is_same_v<Desc, Shader::TextureDescriptor>) {
-                        return {Texture, info.texture_descriptors.data()};
-                    } else {
-                        return {Image, info.image_descriptors.data()};
-                    }
-                }();
-                const ComputedHandle computed{static_cast<u8>(stage), kind,
-                                              static_cast<u16>(&desc - first), value};
-                // An array's elements all evaluate the same program: one entry per descriptor.
-                if (computed_handles.empty() || computed_handles.back().stage != computed.stage ||
-                    computed_handles.back().kind != computed.kind ||
-                    computed_handles.back().descriptor != computed.descriptor) {
-                    computed_handles.push_back(computed);
-                }
+                    info, desc.handle_program, *gpu_memory, cbuf_address,
+                    device.GetStorageBufferAlignment(), index)};
+                note_computed(desc, index, value);
                 return TexturePair(value, via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);
@@ -895,7 +912,38 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         if (resolve_in_full) {
+            u32 texture{};
             for (const auto& desc : info.texture_descriptors) {
+                if (desc.count > 1 && desc.handle_program != ~0U) {
+                    // A table of handles the shader indexes (one shadow map per light, say), read
+                    // in one go; elements repeating a sampler share its lookup. A pipeline with
+                    // handle programs never takes the texture memo (texture_memo_eligible).
+                    const size_t first{views.size()};
+                    u32 last_sampler_index{~0U};
+                    VideoCommon::SamplerId sampler{};
+                    VideoCommon::EvaluateTextureHandles(
+                        info, desc.handle_program, *gpu_memory, cbuf_address,
+                        device.GetStorageBufferAlignment(), desc.count, [&](u32 element, u32 raw) {
+                            note_computed(desc, element, raw);
+                            const auto handle{TexturePair(raw, via_header_index)};
+                            views.push_back({handle.first});
+                            if (handle.second != last_sampler_index) {
+                                sampler = texture_cache.GetSamplerId(handle.second, false);
+                                last_sampler_index = handle.second;
+                            }
+                            samplers.push_back(sampler);
+                        });
+                    if (VideoCommon::HandleTableNotes::Wanted()) {
+                        std::vector<u32> tics(desc.count);
+                        for (u32 index = 0; index < desc.count; ++index) {
+                            tics[index] = views[first + index].index;
+                        }
+                        VideoCommon::HandleTableNotes::Note(key.unique_hashes[stage + 1], texture,
+                                                            tics);
+                    }
+                    ++texture;
+                    continue;
+                }
                 for (u32 index = 0; index < desc.count; ++index) {
                     const auto handle{VideoCommon::HandleIsStoragePointer(info, desc, index)
                                           ? VideoCommon::NULL_TEXTURE_HANDLE
@@ -910,6 +958,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                              via_header_index ? handle.first : handle.first | (handle.second << 20)});
                     }
                 }
+                ++texture;
             }
         }
         if constexpr (Spec::has_images) {
@@ -988,7 +1037,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         ReportTextureMemo();
     }
-    if (RecordingSampledTextures()) {
+    if (RecordingSampledTextures() || DrawReuseProbeEnabled()) {
         sampled_images.clear();
         size_t view_index{};
         size_t sampler_index{};
@@ -1028,6 +1077,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         delta_views.assign(views.begin(), views.end());
         delta_samplers.assign(samplers.begin(), samplers.end());
         delta_computed_handles.assign(computed_handles.begin(), computed_handles.end());
+        delta_computed_values.assign(computed_values.begin(), computed_values.end());
         configured_stages = Spec::enabled_stages;
         delta_raw_handles.clear();
         if (retexture_eligible && !ReadRawHandles(delta_raw_handles)) {
@@ -1223,250 +1273,42 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-bool GraphicsPipeline::SharesDeltaStateWith(const GraphicsPipeline& other) const noexcept {
-    if (delta_blocker != DeltaBlocker::None || other.delta_blocker != DeltaBlocker::None ||
-        mesh_emulation || other.mesh_emulation || stage_enabled != other.stage_enabled ||
-        uses_push_descriptor != other.uses_push_descriptor ||
-        uses_descriptor_buffer != other.uses_descriptor_buffer ||
-        num_image_elements != other.num_image_elements || num_textures != other.num_textures) {
-        return false;
-    }
-    // Computed handles are evaluated with the shader's own handle programs.
-    if ((has_computed_handles || other.has_computed_handles) &&
-        ShaderHashes() != other.ShaderHashes()) {
-        return false;
-    }
-    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-        const Shader::Info& lhs = stage_infos[stage];
-        const Shader::Info& rhs = other.stage_infos[stage];
-        if (lhs.texture_buffer_descriptors != rhs.texture_buffer_descriptors ||
-            lhs.image_buffer_descriptors != rhs.image_buffer_descriptors ||
-            lhs.texture_descriptors != rhs.texture_descriptors ||
-            lhs.image_descriptors != rhs.image_descriptors) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void GraphicsPipeline::TakeDeltaStateFrom(GraphicsPipeline& other) noexcept {
-    delta_views.swap(other.delta_views);
-    delta_samplers.swap(other.delta_samplers);
-    delta_raw_handles.swap(other.delta_raw_handles);
-    delta_computed_handles.swap(other.delta_computed_handles);
-    kept_image_entries.swap(other.kept_image_entries);
-    configured_stages = other.configured_stages;
-    kept_image_ranges = other.kept_image_ranges;
-    kept_rescaling = other.kept_rescaling;
-    kept_scale_epoch = other.kept_scale_epoch;
-    delta_views_valid = std::exchange(other.delta_views_valid, false);
-    kept_images_valid = std::exchange(other.kept_images_valid, false);
-    NextDeltaGeneration();
-    other.NextDeltaGeneration();
-}
-
-bool GraphicsPipeline::ReadRawHandles(std::vector<u32>& out, std::vector<u32>* computed) const {
-    // As ConfigureImpl's read_handle reads them for texture-only pipelines, in its order; words a
-    // storage buffer keeps its address in bind no texture (~0, never compared changed). A handle
-    // computed at draw time is evaluated once per descriptor (its elements share it) and also
-    // appended to `computed`, in delta_computed_handles' order.
-    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-        if (!configured_stages[stage]) {
-            continue;
-        }
-        const Shader::Info& info{stage_infos[stage]};
-        const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
-        for (const auto& desc : info.texture_descriptors) {
-            if (desc.handle_program != ~0U) {
-                if (desc.count == 0) {
-                    continue;
-                }
-                const u32 value{VideoCommon::EvaluateTextureHandle(
-                    info, desc.handle_program, *gpu_memory,
-                    [&](u32 cbuf) -> GPUVAddr {
-                        return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
-                                                                          : GPUVAddr{};
-                    },
-                    device.GetStorageBufferAlignment())};
-                if (computed != nullptr) {
-                    computed->push_back(value);
-                }
-                out.insert(out.end(), desc.count, value);
-                continue;
-            }
-            for (u32 index = 0; index < desc.count; ++index) {
-                if (VideoCommon::HandleIsStoragePointer(info, desc, index)) {
-                    out.push_back(~0U);
-                    continue;
-                }
-                if (!cbufs[desc.cbuf_index].enabled) {
-                    return false;
-                }
-                const u32 word{gpu_memory->Read<u32>(cbufs[desc.cbuf_index].address +
-                                                     desc.cbuf_offset +
-                                                     (index << desc.size_shift))};
-                if (!desc.has_secondary) {
-                    out.push_back(word);
-                    continue;
-                }
-                if (!cbufs[desc.secondary_cbuf_index].enabled) {
-                    return false;
-                }
-                const u32 second{gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
-                                                       desc.secondary_cbuf_offset)};
-                out.push_back((word << desc.shift_left) | (second << desc.secondary_shift_left));
-            }
-        }
-    }
-    return out.size() == delta_views.size();
-}
-
-std::optional<u32> GraphicsPipeline::RetextureDelta() {
-    if (!CanRetexture() || delta_raw_handles.size() != delta_views.size() ||
-        delta_samplers.size() != delta_views.size()) {
-        return std::nullopt;
-    }
-    retexture_computed.clear();
-    if (!ReadRawHandles(retexture_handles, &retexture_computed) ||
-        retexture_computed.size() != delta_computed_handles.size()) {
-        retexture_handles.clear();
-        return std::nullopt;
-    }
-    small_vector<u32, 16> changed;
-    small_vector<u32, 16> raws;
-    for (u32 element = 0; element < retexture_handles.size(); ++element) {
-        if (retexture_handles[element] != delta_raw_handles[element]) {
-            changed.push_back(element);
-            raws.push_back(retexture_handles[element]);
-        }
-    }
-    retexture_handles.clear();
-    if (changed.empty()) {
-        return 0U;
-    }
-    if (!ResolveChangedViews(std::span(changed.data(), changed.size()),
-                             std::span(raws.data(), raws.size()))) {
-        return std::nullopt;
-    }
-    for (size_t i = 0; i < retexture_computed.size(); ++i) {
-        delta_computed_handles[i].value = retexture_computed[i];
-    }
-    return static_cast<u32>(changed.size());
-}
-
 bool GraphicsPipeline::ComputedHandlesChanged() const {
-    return std::ranges::any_of(delta_computed_handles, [this](const ComputedHandle& handle) {
-        return EvaluateComputedHandle(handle) != handle.value;
-    });
-}
-
-u32 GraphicsPipeline::EvaluateComputedHandle(const ComputedHandle& handle) const {
-    const Shader::Info& info{stage_infos[handle.stage]};
-    const auto& cbufs{maxwell3d->state.shader_stages[handle.stage].const_buffers};
-    u32 program{};
-    switch (handle.kind) {
-    case TextureBuffer:
-        program = info.texture_buffer_descriptors[handle.descriptor].handle_program;
-        break;
-    case ImageBuffer:
-        program = info.image_buffer_descriptors[handle.descriptor].handle_program;
-        break;
-    case Texture:
-        program = info.texture_descriptors[handle.descriptor].handle_program;
-        break;
-    default:
-        program = info.image_descriptors[handle.descriptor].handle_program;
-        break;
-    }
-    // As ConfigureImpl's read_handle computes it.
-    return VideoCommon::EvaluateTextureHandle(
-        info, program, *gpu_memory,
-        [&](u32 cbuf) -> GPUVAddr {
-            return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address : GPUVAddr{};
-        },
-        device.GetStorageBufferAlignment());
-}
-
-std::optional<u32> GraphicsPipeline::RetextureComputed() {
-    if (!CanRetexture() || delta_raw_handles.size() != delta_views.size() ||
-        delta_samplers.size() != delta_views.size()) {
-        return std::nullopt;
-    }
-    small_vector<std::pair<size_t, u32>, 8> changed_handles;
-    for (size_t i = 0; i < delta_computed_handles.size(); ++i) {
-        const u32 value = EvaluateComputedHandle(delta_computed_handles[i]);
-        if (value != delta_computed_handles[i].value) {
-            changed_handles.emplace_back(i, value);
+    for (const ComputedHandle& handle : delta_computed_handles) {
+        const Shader::Info& info{stage_infos[handle.stage]};
+        const auto& cbufs{maxwell3d->state.shader_stages[handle.stage].const_buffers};
+        u32 program{};
+        switch (handle.kind) {
+        case TextureBuffer:
+            program = info.texture_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case ImageBuffer:
+            program = info.image_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case Texture:
+            program = info.texture_descriptors[handle.descriptor].handle_program;
+            break;
+        default:
+            program = info.image_descriptors[handle.descriptor].handle_program;
+            break;
+        }
+        // Each element as ConfigureImpl computes it (EvaluateTextureHandles gives the values
+        // EvaluateTextureHandle does, reading the words the elements share once).
+        bool changed{};
+        VideoCommon::EvaluateTextureHandles(
+            info, program, *gpu_memory,
+            [&](u32 cbuf) -> GPUVAddr {
+                return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
+                                                                  : GPUVAddr{};
+            },
+            device.GetStorageBufferAlignment(), handle.count, [&](u32 element, u32 value) {
+                changed |= value != delta_computed_values[handle.first_value + element];
+            });
+        if (changed) {
+            return true;
         }
     }
-    if (changed_handles.empty()) {
-        return 0U;
-    }
-    // The elements of each changed handle's descriptor, in delta_views' order (ReadRawHandles):
-    // the configured stages' texture descriptors one after another, an element per array entry.
-    small_vector<u32, 16> elements;
-    small_vector<u32, 16> raws;
-    for (const auto& [index, value] : changed_handles) {
-        const ComputedHandle& handle = delta_computed_handles[index];
-        if (handle.kind != Texture || !configured_stages[handle.stage]) {
-            return std::nullopt;
-        }
-        u32 first = 0;
-        for (size_t stage = 0; stage < handle.stage; ++stage) {
-            if (configured_stages[stage]) {
-                first += Shader::NumDescriptors(stage_infos[stage].texture_descriptors);
-            }
-        }
-        const auto& descriptors = stage_infos[handle.stage].texture_descriptors;
-        for (u16 descriptor = 0; descriptor < handle.descriptor; ++descriptor) {
-            first += descriptors[descriptor].count;
-        }
-        for (u32 element = 0; element < descriptors[handle.descriptor].count; ++element) {
-            if (first + element >= delta_views.size()) {
-                return std::nullopt;
-            }
-            elements.push_back(first + element);
-            raws.push_back(value);
-        }
-    }
-    if (!ResolveChangedViews(std::span(elements.data(), elements.size()),
-                             std::span(raws.data(), raws.size()))) {
-        return std::nullopt;
-    }
-    for (const auto& [index, value] : changed_handles) {
-        delta_computed_handles[index].value = value;
-    }
-    return static_cast<u32>(elements.size());
-}
-
-bool GraphicsPipeline::ResolveChangedViews(std::span<const u32> elements,
-                                           std::span<const u32> raws) {
-    const bool via_header_index{maxwell3d->regs.sampler_binding ==
-                                Maxwell::SamplerBinding::ViaHeaderBinding};
-    // Resolving a view can delete or rescale images (both break the fast draw serial) the views
-    // kept for the other handles may sample: then the draw resolves everything in full.
-    const u64 serial = VideoCommon::Nx2FastDraw::Serial();
-    small_vector<VideoCommon::ImageViewInOut, 16> views;
-    small_vector<VideoCommon::SamplerId, 16> samplers;
-    for (const u32 raw : raws) {
-        const auto [image_index, sampler_index] = TexturePair(raw, via_header_index);
-        views.push_back({image_index});
-        samplers.push_back(texture_cache.GetSamplerId(sampler_index, false));
-    }
-    texture_cache.FillImageViews(std::span(views.data(), views.size()), false, false);
-    if (VideoCommon::Nx2FastDraw::Serial() != serial) {
-        return false;
-    }
-    for (size_t i = 0; i < elements.size(); ++i) {
-        delta_views[elements[i]] = views[i];
-        delta_samplers[elements[i]] = samplers[i];
-        delta_raw_handles[elements[i]] = raws[i];
-    }
-    // The kept descriptors and rescaling words are for the old views: ConfigureDelta pushes and
-    // keeps them again.
-    kept_images_valid = false;
-    NextDeltaGeneration();
-    return true;
+    return false;
 }
 
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
@@ -1608,6 +1450,9 @@ void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {
                               entries + end_entry);
 }
 
+/// Writes the descriptors the stages queued and the push constants, then records the draw's state
+/// and bindings. Returns false, and the draw is skipped, when the queued descriptor count does not
+/// match the pipeline or no descriptor memory can be reserved.
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
@@ -1752,7 +1597,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 .payload_words = mesh_emulation->payload_stride,
                 .capacity_words = capacity,
                 .block_words = mesh_emulation->block_words,
-                .vertices_per_group = mesh_emulation->max_primitives * 3,
+                .vertices_per_group = MeshEmulationVerticesPerGroup(),
                 .max_groups = device.GetMaxComputeWorkGroupCount()[0],
             };
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *distribution_pipeline);
@@ -1883,6 +1728,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     return true;
 }
 
+/// Creates the Vulkan pipeline for `render_pass`. A mesh pipeline without VK_EXT_mesh_shader is
+/// built from the mesh emulation's vertex shader as a point, line or triangle list.
 void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
         return;
@@ -2343,7 +2190,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 : StageFlag(info, MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage)))};
         // Votes, ballots and shuffles span the guest's 32-thread warp. A driver free to pick a
         // narrower subgroup (Intel runs mesh shaders SIMD16) splits the warp and breaks them.
-        const bool uses_warp_ops = info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+        const bool uses_warp_ops = info.removed_conditional_barrier || info.uses_subgroup_vote ||
+                                   info.uses_subgroup_invocation_id ||
                                    info.uses_subgroup_shuffles || info.uses_subgroup_mask;
         const bool force_warp_size = !emulated_vertex && uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
                                      device.IsGuestWarpSizeSupported(stage_flag);
@@ -2357,7 +2205,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             .pSpecializationInfo = nullptr,
         });
     }
-    // Mesh emulation draws a plain triangle list without vertex attributes.
+    // Mesh emulation draws a plain point, line or triangle list without vertex attributes.
     const VkPipelineVertexInputStateCreateInfo emulation_vertex_input{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = nullptr,
@@ -2367,11 +2215,14 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .vertexAttributeDescriptionCount = 0,
         .pVertexAttributeDescriptions = nullptr,
     };
+    const u32 emulation_corners{mesh_emulation ? mesh_emulation->primitive_vertices : 3U};
     const VkPipelineInputAssemblyStateCreateInfo emulation_input_assembly{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = emulation_corners == 1   ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                    : emulation_corners == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                                             : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE,
     };
     VkPipelineCreateFlags flags{};

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -10,11 +9,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "common/thread_worker.h"
@@ -78,14 +79,25 @@ class RescalingPushConstant;
 class RenderAreaPushConstant;
 class Scheduler;
 
+/// EDEN_NX2_DRAW_REUSE_PROBE=1: how many draws repeat the previous frame's slowly changing state,
+/// and what preparing them costs (RasterizerVulkan::NoteDrawReuse).
+inline bool DrawReuseProbeEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DRAW_REUSE_PROBE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
 /// Mesh emulation on a device without VK_EXT_mesh_shader: the mesh program (stage 0) is built as
 /// a compute shader that writes its output to a storage buffer, and this vertex shader draws it
 /// (see Shader::Backend::SPIRV::EmitMeshEmulationVertex).
 struct MeshEmulationSetup {
     std::vector<u32> vertex_spirv;
     u32 output_binding{};
-    u32 block_words{};    ///< output words per mesh workgroup
-    u32 max_primitives{}; ///< triangles per mesh workgroup
+    u32 block_words{};          ///< output words per mesh workgroup
+    u32 max_primitives{};       ///< primitives per mesh workgroup
+    u32 primitive_vertices{3};  ///< vertices per primitive: 1 points, 2 lines, 3 triangles
     // With a task program (stage 0, the mesh program at mesh_stage): its payload buffer and the
     // distribution pass's offsets and arguments (Shader::RuntimeInfo), and that pass's shader.
     bool has_task{};
@@ -132,11 +144,20 @@ public:
         std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
+    /// Draws resolved from the texture memo and in full since the last call.
+    static std::pair<u64, u64> TakeTextureMemoCounts() noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
     u64 DynamicAttributeTypes() const noexcept { return key.state.attribute_types; }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
+    }
+    const GraphicsPipelineCacheKey& Key() const noexcept {
+        return key;
+    }
+    /// Each stage's SPIR-V (zstd), kept once the pipeline is built; empty for absent stages.
+    const std::array<std::vector<u8>, NUM_STAGES>& KeptSpirv() const noexcept {
+        return kept_spirv;
     }
 
     struct SampledImage {
@@ -146,7 +167,8 @@ public:
         VideoCommon::SamplerId sampler;
     };
 
-    /// The sampled textures of the last configured draw, kept while a sampled frame dump runs.
+    /// The sampled textures of the last configured draw, kept while a sampled frame dump or the
+    /// draw reuse probe runs.
     std::span<const SampledImage> SampledImages() const noexcept {
         return sampled_images;
     }
@@ -188,9 +210,10 @@ public:
         return mesh_emulation ? u64{mesh_emulation->block_words} * 4 : 0;
     }
 
-    /// Vertices of the emulation's triangle list for one mesh workgroup.
+    /// Vertices of the emulation's point, line or triangle list for one mesh workgroup.
     [[nodiscard]] u32 MeshEmulationVerticesPerGroup() const noexcept {
-        return mesh_emulation ? mesh_emulation->max_primitives * 3 : 0;
+        return mesh_emulation ? mesh_emulation->max_primitives * mesh_emulation->primitive_vertices
+                              : 0;
     }
 
     /// The emulation's setup (output layout), or null.
@@ -330,7 +353,6 @@ public:
         None,
         WritesImages,
         Mesh,
-        ComputedHandles,
         NotConfigured,
         Count,
     };
@@ -377,53 +399,20 @@ public:
     /// ConfigureDelta prepares none, Configure does.
     [[nodiscard]] bool DeltaImagesChange() const noexcept;
 
-    /// Whether `other` resolves the same image views, samplers and image descriptors from the same
-    /// constant buffer words: the same stages, and the same texture and image descriptors in each
-    /// (the same shaders when a handle is computed at draw time). What one kept for delta draws
-    /// then stands for the other.
-    [[nodiscard]] bool SharesDeltaStateWith(const GraphicsPipeline& other) const noexcept;
-
-    /// Takes what `other` (SharesDeltaStateWith) kept for delta draws; `other` keeps nothing.
-    void TakeDeltaStateFrom(GraphicsPipeline& other) noexcept;
-
-    /// Changes whenever what the pipeline keeps for delta draws changes (a captured Configure,
-    /// RetextureDelta resolving some views, TakeDeltaStateFrom on either side), unique among
-    /// pipelines: a remembered draw of the pipeline stands for what it keeps only while equal.
-    [[nodiscard]] u64 DeltaGeneration() const noexcept {
-        return delta_generation;
+    /// The shader info of a pipeline stage (vertex B to fragment), null for a stage it lacks.
+    [[nodiscard]] const Shader::Info* StageInfo(size_t stage) const noexcept {
+        return stage_present[stage] ? &stage_infos[stage] : nullptr;
     }
 
-    /// Whether RetextureDelta can bring the kept views up to date: the pipeline samples textures
-    /// only (no texture or image buffers or images), from constant buffer words or handles
-    /// computed at draw time.
-    [[nodiscard]] bool CanRetexture() const noexcept {
-        return (texture_memo_eligible || retexture_eligible) && TakesDeltaDraws();
+    /// Built from a precompiled pipeline's recorded environments and shader infos (see
+    /// PipelineCache::CreatePrecompiledGraphicsPipeline): a failed build is replaced by a
+    /// pipeline translated from the game's state.
+    void MarkPrecompiled() noexcept {
+        precompiled = true;
     }
-    /// Whether a texture handle is computed at draw time (ComputedHandlesChanged).
-    [[nodiscard]] bool HasComputedHandles() const noexcept {
-        return has_computed_handles;
+    [[nodiscard]] bool IsPrecompiled() const noexcept {
+        return precompiled;
     }
-    /// ConfigureDelta keeps the texture buffers bound, which a draw of another pipeline may have
-    /// left in this one's stages (the rasterizer's RevisitDraw). CanRetexture pipelines bind
-    /// none: unbinds them, as Configure does.
-    void UnbindStageTextureBuffers() {
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            if (configured_stages[stage]) {
-                buffer_cache.UnbindGraphicsTextureBuffers(stage);
-            }
-        }
-    }
-    /// Delta draws after texture handle writes or rebinds, and revisits: reads (or computes) every
-    /// handle again and resolves the views and samplers of those that changed, keeping the others;
-    /// the next ConfigureDelta pushes their descriptors again. Returns how many it resolved, or
-    /// nothing (the draw resolves in full) when the handles can't be read or resolving deleted or
-    /// rescaled images the kept views may sample.
-    std::optional<u32> RetextureDelta();
-    /// RetextureDelta for a delta draw after which only handles computed at draw time can have
-    /// changed (no constant buffer of handles was bound or written): evaluates those once and
-    /// resolves only their descriptors' views. Returns how many views it resolved (0 when none
-    /// changed), or nothing when the draw must resolve in full.
-    std::optional<u32> RetextureComputed();
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
@@ -478,9 +467,8 @@ private:
     std::array<std::vector<u8>, NUM_STAGES> kept_spirv; ///< zstd, after the build
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
-    /// Stages with a shader, and whether a handle is computed at draw time (SharesDeltaStateWith).
-    std::array<bool, NUM_STAGES> stage_enabled{};
-    bool has_computed_handles{};
+    std::array<bool, NUM_STAGES> stage_present{};
+    bool precompiled{};
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
@@ -520,27 +508,19 @@ private:
         handle_word_index{};
     std::vector<VideoCommon::ImageViewInOut> delta_views;
     std::vector<VideoCommon::SamplerId> delta_samplers;
-    /// The handles delta_views and delta_samplers were resolved from (CanRetexture pipelines,
-    /// RetextureDelta), and RetextureDelta's scratch.
-    std::vector<u32> delta_raw_handles;
-    std::vector<u32> retexture_handles;
-    std::vector<u32> retexture_computed;
-    /// A handle the captured Configure computed at draw time: the descriptor it was read for
-    /// (stage, kind as ComputedHandleKind, index in its list) and its value.
+    /// A descriptor whose handles the captured Configure computed at draw time: the descriptor
+    /// (stage, kind as ComputedHandleKind, index in its list) and its elements' values, count of
+    /// them from delta_computed_values[first_value].
     struct ComputedHandle {
         u8 stage;
         u8 kind;
         u16 descriptor;
-        u32 value;
+        u32 count;
+        u32 first_value;
     };
     enum ComputedHandleKind : u8 { TextureBuffer, ImageBuffer, Texture, Image };
     std::vector<ComputedHandle> delta_computed_handles;
-    /// The value `handle`'s program computes now, as ConfigureImpl's read_handle does.
-    [[nodiscard]] u32 EvaluateComputedHandle(const ComputedHandle& handle) const;
-    /// Resolves the views and samplers of the raw handles `raws` for delta_views' `elements`
-    /// and keeps them (the next ConfigureDelta pushes their descriptors again). False when
-    /// resolving deleted or rescaled images (the fast draw serial changed): nothing kept.
-    bool ResolveChangedViews(std::span<const u32> elements, std::span<const u32> raws);
+    std::vector<u32> delta_computed_values;
     /// Delta draws: the image descriptor entries (first entry and count per
     /// stage) and rescaling words pushed for delta_views, which delta draws push again while no
     /// image changed its scale (TextureCache::ScaleEpoch).

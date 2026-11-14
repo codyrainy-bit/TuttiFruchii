@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -15,6 +14,7 @@
 #include <vector>
 
 #include "common/alignment.h"
+#include "common/assert.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
@@ -37,9 +37,11 @@ enum class Type {
     Max
 };
 
-/// Page tracking changes a thread applies itself once it drops the buffer cache's lock
+/// Page untracking a thread applies itself once it drops the buffer cache's lock
 /// (RasterizerVulkan::OnCPUWrite): changing a page's host protection is a system call, and every
-/// other thread drawing or reading waited for it.
+/// other thread drawing or reading waited for it. Only untracking waits: a page protected a little
+/// longer traps a write that then finds it untracked, but a page tracked late lets a write through
+/// unseen.
 class DeferredPageCaching {
 public:
     using Ranges = std::vector<std::pair<VAddr, size_t>>;
@@ -60,6 +62,10 @@ public:
         }
         batches.clear();
         collected.clear();
+    }
+
+    [[nodiscard]] bool Empty() const {
+        return batches.empty();
     }
 
 private:
@@ -352,17 +358,20 @@ struct WordManager {
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         if (!Nx2Perf::Verify()) {
             CoalesceInPlace(ranges);
-            if (t_deferred_page_caching != nullptr) [[unlikely]] {
-                t_deferred_page_caching->Add(
-                    tracker,
-                    [](void* deferred_tracker, std::span<const std::pair<VAddr, size_t>> runs,
-                       s32 run_delta) {
-                        static_cast<DeviceTracker*>(deferred_tracker)
-                            ->UpdatePagesCachedBatch(runs, run_delta);
-                    },
-                    ranges, delta);
-                ranges.clear();
-                return;
+            if (t_deferred_page_caching != nullptr) {
+                ASSERT_MSG(delta < 0, "deferred page caching was asked to track pages");
+                if (delta < 0) {
+                    t_deferred_page_caching->Add(
+                        tracker,
+                        [](void* deferred_tracker, std::span<const std::pair<VAddr, size_t>> runs,
+                           s32 run_delta) {
+                            static_cast<DeviceTracker*>(deferred_tracker)
+                                ->UpdatePagesCachedBatch(runs, run_delta);
+                        },
+                        ranges, delta);
+                    ranges.clear();
+                    return;
+                }
             }
             tracker->UpdatePagesCachedBatch(
                 std::span<const std::pair<VAddr, size_t>>(ranges.data(), ranges.size()), delta);

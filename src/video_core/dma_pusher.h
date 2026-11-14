@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -117,6 +116,10 @@ inline CommandHeader BuildCommandHeader(BufferMethods method, u32 arg_count, Sub
 namespace CommandWordsPool {
 [[nodiscard]] void* Allocate(std::size_t bytes);
 void Deallocate(void* pointer, std::size_t bytes) noexcept;
+/// Frees the blocks kept for reuse (when a channel goes away).
+void Trim() noexcept;
+/// Bytes kept for reuse.
+[[nodiscard]] std::size_t PooledBytes() noexcept;
 } // namespace CommandWordsPool
 
 template <typename T>
@@ -161,7 +164,7 @@ struct CommandList final {
     /// release the acquire.
     u64 snapshot_suspensions = 0;
     /// The snapshot copier's job that copies the words again (DmaPusher::QueueSnapshotCopy), 0
-    /// for none: the GPU thread waits for it before it parses the list.
+    /// for none: the GPU thread waits for it before it parses or copies the list itself.
     u64 copy_job = 0;
 };
 
@@ -210,6 +213,10 @@ public:
         return puller.HasPendingAcquire() || pending_list_tick.has_value();
     }
     [[nodiscard]] bool CanResumeAcquire();
+    /// Suspended on the GPU's copy of a command list.
+    [[nodiscard]] bool WaitsForListCopy() const {
+        return pending_list_tick.has_value();
+    }
 
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
         subchannels[subchannel_id] = engine;
@@ -249,26 +256,15 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
-    /// EDEN_NX2_DRAIN_CHECK: checks an entry on pages no GPU work had written against the compute
-    /// and copy work it did not wait for (Nx2DrainCheck).
-    void CheckUnwaitedWriters(GPUVAddr address, size_t size);
-    /// TEST (EDEN_NX2_GPU_PROFILE): the entry about to be parsed waited `ns` for the compute and
-    /// copy work before the last sync; counted by the method its words continue, logged every
-    /// 10 s.
-    void NoteListWriterWait(bool command_entry, bool gpu_written, u64 ns, u32 words);
-    /// Keeps the front's copy of the copy and inline-to-memory engines' registers, with the split
-    /// and without.
-    void ShadowEngineMethod(Engines::EngineTypes type, u32 method, u32 argument);
-    /// An engine method was just sent to the split's back, as it is: places what a copy launch or
-    /// an inline-to-memory upload writes (GpuSplit::NoteWrite), and tells what a launch releases
-    /// (GpuSplit::NoteSemaphoreWrite).
-    void NoteEngineWrites(Engines::EngineTypes type, u32 method);
+    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
+    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
+    void NoteDmaSemaphore(u32 method, u32 argument);
     /// Copies the list's words from memory again, as of suspension count `now`, from entry
-    /// `first_entry` on (the entries before it ran already).
+    /// `first_entry` on (the entries before it ran already). Waits for the list's copier job first.
     void RefreshSnapshot(CommandList& list, u64 now, size_t first_entry = 0);
     /// RefreshSnapshot on the snapshot copier's thread. False when its queue is full (the caller
     /// copies).
-    bool QueueSnapshotCopy(CommandList& list, u64 now, size_t first_entry);
+    bool QueueSnapshotCopy(CommandList& list, u64 now);
     /// Waits until the snapshot copier copied everything queued (before work that may change the
     /// GPU's mappings, and before a channel goes away).
     static void WaitForSnapshotCopies();
@@ -379,6 +375,8 @@ public:
     std::optional<u64> pending_list_tick;
     /// The entry parsed next was suspended on pending_list_tick, which is done now.
     bool resumed_list_read{};
+    /// When the channel suspended on pending_list_tick (EDEN_NX2_LIST_MACRO_TRACE), else 0.
+    u64 list_trace_wait_start{};
 
     // Not bitfields: the fence thread sets synced, and a bitfield write would rewrite the byte it
     // shares with dma_increment_once and signal_sync (#479).
