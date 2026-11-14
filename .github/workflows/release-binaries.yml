@@ -80,8 +80,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: linux-x86_64
-            runner: ubuntu-24.04
           # The Linux -pgo builds are the same programs compiled by clang against the repo's
           # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
           # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
@@ -91,19 +89,13 @@ jobs:
           - platform: linux-x86_64-pgo
             runner: ubuntu-24.04
             pgo: true
-          - platform: windows-x86_64
-            runner: windows-2022
           - platform: windows-x86_64-pgo
             runner: windows-2022
             pgo: true
             profile: lichii-windows.profdata
-          - platform: linux-aarch64
-            runner: ubuntu-24.04-arm
-          - platform: linux-aarch64-pgo
-            runner: ubuntu-24.04-arm
-            pgo: true
-          - platform: macos-arm64
-            runner: macos-15
+          # Only the PGO x86-64 builds are published: the standard Linux build, the aarch64 ones
+          # and macOS are not wanted here. The steps that serve them are still gated on
+          # matrix.platform, so re-adding an entry is all it takes to bring one back.
 
     steps:
       - name: Check out source
