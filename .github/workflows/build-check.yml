@@ -286,3 +286,5 @@ jobs:
             .cache/cpm
             .ccache
           key: clang-cl-ccache-qt683-${{ runner.os }}-${{ github.sha }}
+
+# touch: re-scan workflows
