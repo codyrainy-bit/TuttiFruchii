@@ -650,16 +650,17 @@ size_t GetTotalPipelineWorkers() {
     /// EDEN_NX2_PIPELINE_WORKERS=<n> sets the worker count directly (unset: one less than the
     /// hardware thread count, which keeps a core for the emulated CPUs and the GPU thread).
     if (const char* const value = std::getenv("EDEN_NX2_PIPELINE_WORKERS")) {
-        return (std::max)(static_cast<size_t>(std::strtoull(value, nullptr, 10)), 1ULL);
+        return (std::max)(static_cast<size_t>(std::strtoull(value, nullptr, 10)), size_t{1});
     }
     const size_t max_core_threads =
-        std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
+        std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), size_t{2}) -
+        size_t{1};
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
     const size_t desired = static_cast<size_t>(clamped);
     if (desired == 0) {
-        return 1ULL;
+        return size_t{1};
     }
     return std::min(max_core_threads, desired);
 #else
