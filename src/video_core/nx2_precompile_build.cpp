@@ -1399,7 +1399,7 @@ PrecompiledCounts WritePrecompiled(const std::filesystem::path& out, const GameT
         CachedPipeline record = source;
         for (auto& env : record.envs) {
             std::erase_if(env.cbuf_values,
-                          [](const auto& entry) { return entry.first == ReadPropertiesKey; });
+                          [&](const auto& entry) { return entry.first == ReadPropertiesKey; });
         }
         std::vector<std::vector<u8>> blobs;
         for (const auto& env : record.envs) {

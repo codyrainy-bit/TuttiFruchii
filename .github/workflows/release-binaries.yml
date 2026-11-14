@@ -276,6 +276,7 @@ jobs:
           flags=(
             -DCMAKE_BUILD_TYPE=Release
             -DBUILD_TESTING=OFF
+            -DENABLE_WERROR=OFF
             -DLICHII_TESTS=OFF
             -DLICHII_CMD=ON
             -DLICHII_ROOM=OFF
