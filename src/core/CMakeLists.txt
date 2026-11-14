@@ -45,14 +45,14 @@ add_library(core STATIC
     debugger/gdbstub.h
     debugger/gdbstub_arch.cpp
     debugger/gdbstub_arch.h
-    debugger/nx2_bug_bundle.cpp
-    debugger/nx2_bug_bundle.h
+# MISSING(port):     debugger/nx2_bug_bundle.cpp
+# MISSING(port):     debugger/nx2_bug_bundle.h
     debugger/nx2_debug_server.cpp
     debugger/nx2_debug_server.h
     debugger/nx2_debug_tools.cpp
     debugger/nx2_debug_tools.h
-    debugger/nx2_zip.cpp
-    debugger/nx2_zip.h
+# MISSING(port):     debugger/nx2_zip.cpp
+# MISSING(port):     debugger/nx2_zip.h
     device_memory.cpp
     device_memory.h
     device_memory_manager.h
@@ -359,8 +359,8 @@ add_library(core STATIC
     hle/kernel/kernel.h
     hle/kernel/memory_types.h
     hle/kernel/message_buffer.h
-    hle/kernel/nx2_thread_stats.cpp
-    hle/kernel/nx2_thread_stats.h
+# MISSING(port):     hle/kernel/nx2_thread_stats.cpp
+# MISSING(port):     hle/kernel/nx2_thread_stats.h
     hle/kernel/physical_core.cpp
     hle/kernel/physical_core.h
     hle/kernel/slab_helpers.h
@@ -412,8 +412,8 @@ add_library(core STATIC
     hle/service/acc/async_context.cpp
     hle/service/acc/async_context.h
     hle/service/acc/errors.h
-    hle/service/acc/nextendo_id_token.cpp
-    hle/service/acc/nextendo_id_token.h
+# MISSING(port):     hle/service/acc/nextendo_id_token.cpp
+# MISSING(port):     hle/service/acc/nextendo_id_token.h
     hle/service/acc/profile_manager.cpp
     hle/service/acc/profile_manager.h
     hle/service/am/am.cpp
@@ -1073,7 +1073,7 @@ add_library(core STATIC
     hle/service/nx2_streamplay.h
     hle/service/nx2_stub_interface.h
     hle/service/nx2_gsv.h
-    hle/service/nx2_frame_interval.h
+# MISSING(port):     hle/service/nx2_frame_interval.h
     hle/service/nx2_movie_clock.h
     hle/service/nx2_video_input_queue.h
     hle/service/nx2_image_layout.h
@@ -1109,8 +1109,8 @@ add_library(core STATIC
     hle/service/sockets/bsd.h
     hle/service/sockets/nsd.cpp
     hle/service/sockets/nsd.h
-    hle/service/sockets/nextendo_redirect.cpp
-    hle/service/sockets/nextendo_redirect.h
+# MISSING(port):     hle/service/sockets/nextendo_redirect.cpp
+# MISSING(port):     hle/service/sockets/nextendo_redirect.h
     hle/service/sockets/sfdnsres.cpp
     hle/service/sockets/sfdnsres.h
     hle/service/sockets/sockets.cpp
@@ -1171,8 +1171,8 @@ add_library(core STATIC
     hle/service/wlan/wlan.h
     internal_network/emu_net_state.cpp
     internal_network/emu_net_state.h
-    internal_network/local_redirect.cpp
-    internal_network/local_redirect.h
+# MISSING(port):     internal_network/local_redirect.cpp
+# MISSING(port):     internal_network/local_redirect.h
     internal_network/network.cpp
     internal_network/network.h
     internal_network/network_interface.cpp

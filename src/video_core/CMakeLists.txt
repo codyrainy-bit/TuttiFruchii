@@ -17,7 +17,7 @@ add_library(video_core STATIC
     buffer_cache/buffer_cache_base.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h
-    buffer_cache/indirect_buffer.h
+# MISSING(port):     buffer_cache/indirect_buffer.h
     buffer_cache/memory_tracker_base.h
     buffer_cache/upload_order.h
     buffer_cache/usage_tracker.h
@@ -120,10 +120,10 @@ add_library(video_core STATIC
     native_qmd.h
     native_query_trace.h
     nx2.h
-    nx2_back_idle_trace.cpp
-    nx2_back_idle_trace.h
-    nx2_list_macro_trace.cpp
-    nx2_list_macro_trace.h
+# MISSING(port):     nx2_back_idle_trace.cpp
+# MISSING(port):     nx2_back_idle_trace.h
+# MISSING(port):     nx2_list_macro_trace.cpp
+# MISSING(port):     nx2_list_macro_trace.h
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_lowering.cpp
@@ -364,7 +364,7 @@ add_library(video_core STATIC
     texture_cache/format_lookup_table.h
     texture_cache/image_base.cpp
     texture_cache/image_base.h
-    texture_cache/eviction_age.h
+# MISSING(port):     texture_cache/eviction_age.h
     texture_cache/host_memory_limit.h
     texture_cache/host_mip_limits.h
     texture_cache/image_info.cpp
@@ -396,7 +396,7 @@ add_library(video_core STATIC
     textures/workers.h
     transform_feedback.cpp
     transform_feedback.h
-    vertex_input_cache.h
+# MISSING(port):     vertex_input_cache.h
     video_core.cpp
     video_core.h
 )
@@ -703,8 +703,8 @@ if (ENABLE_NVIDIA_DLSS)
         vulkan_common/streamline.cpp
         vulkan_common/streamline.h
         vulkan_common/streamline_api.h
-        vulkan_common/streamline_frame_gen.cpp
-        vulkan_common/streamline_frame_gen.h
+# MISSING(port):         vulkan_common/streamline_frame_gen.cpp
+# MISSING(port):         vulkan_common/streamline_frame_gen.h
     )
     target_include_directories(video_core PRIVATE "${STREAMLINE_INCLUDE_DIR}")
     target_link_libraries(video_core PRIVATE version wintrust crypt32)
