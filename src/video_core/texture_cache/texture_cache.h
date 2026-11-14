@@ -2114,6 +2114,12 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
     if (!image.IsSafeGpuCopy() || True(image.flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
         return false;
     }
+    // Re-compressed at another size (IsRescaledBc): its host levels don't match the guest's.
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (static_cast<const Image&>(image).IsRescaledBc()) {
+            return false;
+        }
+    }
     if (image.info.num_samples == 1) {
         return true;
     }
@@ -4347,13 +4353,24 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
 
+    // Copies between the new image and an overlap are made from guest extents. An image the
+    // backend re-compressed at another size (IsRescaledBc) does not have those: no copy is made
+    // to or from one, and the new image gets its contents from guest memory instead.
+    const auto rescaled_pair = [&](const Image& overlap) {
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            return overlap.IsRescaledBc() || new_image.IsRescaledBc();
+        } else {
+            return false;
+        }
+    };
     // The copy from an alias into the new image, or null when the loop below skips it.
     const auto alias_copy = [&](const JoinCopy& copy) -> const AliasedImage* {
         if (!copy.is_alias) {
             return nullptr;
         }
         const Image& overlap = slot_images[copy.id];
-        if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples) {
+        if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples ||
+            rescaled_pair(overlap)) {
             return nullptr;
         }
         const auto alias_pointer = join_alias_indices.find(copy.id);
@@ -4389,7 +4406,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         for (const JoinCopy& copy : join_copies_to_do) {
             const Image& overlap = slot_images[copy.id];
             if (copy.is_alias || False(overlap.flags & ImageFlagBits::GpuModified) ||
-                overlap.info.num_samples != 1) {
+                overlap.info.num_samples != 1 || rescaled_pair(overlap)) {
                 continue;
             }
             const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
@@ -4439,7 +4456,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         MarkStaleTransfer(overlap);
         new_image.stale_target.Forbid();
         MarkStaleTransfer(new_image);
-        if (True(overlap.flags & ImageFlagBits::GpuModified)) {
+        if (True(overlap.flags & ImageFlagBits::GpuModified) && !rescaled_pair(overlap)) {
             new_image.flags |= ImageFlagBits::GpuModified;
             const auto& resolution = Settings::values.resolution_info;
             const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
