@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+﻿// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -487,6 +487,34 @@ public:
     /// EDEN_NX2_DRAWX_TWIN: takes what the last captured resolve of `source` (KeepsImageStateOf)
     /// kept for delta draws: views, samplers, image descriptors, rescaling words, handles.
     void TakeDeltaState(const GraphicsPipeline& source);
+    /// The shader info of a pipeline stage (vertex B to fragment), null for a stage it lacks.
+    /// Only the preparation worker keeps them (CaptureStageInfos, for the store); pipeline creation
+    /// and draws use the interned GraphicsStageInfos instead.
+    [[nodiscard]] const Shader::Info* StageInfo(size_t stage) const noexcept {
+        return capture_infos && stage_present[stage] ? &(*capture_infos)[stage] : nullptr;
+    }
+
+    /// Keeps the stage infos a preparation build translated, so the store can serialize them
+    /// (Keep) right after: copied here, and dropped with the pipeline, so no draw pays for them.
+    void CaptureStageInfos(const std::array<const Shader::Info*, NUM_STAGES>& infos) {
+        capture_infos.emplace();
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            stage_present[stage] = infos[stage] != nullptr;
+            if (infos[stage]) {
+                (*capture_infos)[stage] = *infos[stage];
+            }
+        }
+    }
+
+    /// Built from a precompiled pipeline's recorded environments and shader infos (see
+    /// PipelineCache::CreatePrecompiledGraphicsPipeline): a failed build is replaced by a
+    /// pipeline translated from the game's state.
+    void MarkPrecompiled() noexcept {
+        precompiled = true;
+    }
+    [[nodiscard]] bool IsPrecompiled() const noexcept {
+        return precompiled;
+    }
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
@@ -553,6 +581,10 @@ private:
     std::array<std::vector<u8>, 2> kept_mesh_spirv;
 
     GraphicsStageInfos stage_infos;
+    /// Filled only by CaptureStageInfos (see StageInfo): the preparation worker's translation.
+    std::optional<std::array<Shader::Info, NUM_STAGES>> capture_infos;
+    std::array<bool, NUM_STAGES> stage_present{};
+    bool precompiled{};
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
