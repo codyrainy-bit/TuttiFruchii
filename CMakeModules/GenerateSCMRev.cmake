@@ -36,15 +36,15 @@ set(GIT_DESC ${BUILD_VERSION})
 
 # Generate cpp with Git revision from template
 
-set(BUILD_AUTO_UPDATE_STABLE_REPO "codyrainy-bit/tuttifruchii")
+set(BUILD_AUTO_UPDATE_STABLE_REPO "codyrainy-bit/TuttiFruchii")
 set(BUILD_AUTO_UPDATE_STABLE_API "api.github.com")
-set(BUILD_AUTO_UPDATE_API_PATH "/repos/codyrainy-bit/tuttifruchii/releases?per_page=100")
+set(BUILD_AUTO_UPDATE_API_PATH "/repos/codyrainy-bit/TuttiFruchii/releases?per_page=100")
 set(BUILD_AUTO_UPDATE_WEBSITE "https://github.com")
-set(BUILD_AUTO_UPDATE_REPO "codyrainy-bit/tuttifruchii")
+set(BUILD_AUTO_UPDATE_REPO "codyrainy-bit/TuttiFruchii")
 if (NIGHTLY_BUILD)
-    set(REPO_NAME "tuttifruchii Nightly")
+    set(REPO_NAME "TuttiFruchii Nightly")
 else()
-    set(REPO_NAME "tuttifruchii")
+    set(REPO_NAME "TuttiFruchii")
 endif()
 
 set(BUILD_ID ${GIT_REFSPEC})

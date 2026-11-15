@@ -259,10 +259,10 @@ add_executable(lichii
     game/carousel.h game/carousel.cpp
 )
 
-# Windows ships as tuttifruchii.exe; the other platforms keep the lichii binary name their
+# Windows ships as TuttiFruchii.exe; the other platforms keep the lichii binary name their
 # packaging and CI scripts already reference.
 if (WIN32)
-    set_target_properties(lichii PROPERTIES OUTPUT_NAME "tuttifruchii")
+    set_target_properties(lichii PROPERTIES OUTPUT_NAME "TuttiFruchii")
 else()
     set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
 endif()

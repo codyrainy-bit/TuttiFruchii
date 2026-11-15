@@ -20,9 +20,9 @@
 Unicode true
 ManifestDPIAware true
 
-!define PRODUCT_NAME "tuttifruchii"
-!define PRODUCT_PUBLISHER "tuttifruchii"
-!define PRODUCT_WEB_SITE "https://github.com/codyrainy-bit/tuttifruchii"
+!define PRODUCT_NAME "TuttiFruchii"
+!define PRODUCT_PUBLISHER "TuttiFruchii"
+!define PRODUCT_WEB_SITE "https://github.com/codyrainy-bit/TuttiFruchii"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_NAME}.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
@@ -52,7 +52,7 @@ Page custom desktopShortcutPageCreate desktopShortcutPageLeave
 ; Instfiles page
 !insertmacro MUI_PAGE_INSTFILES
 ; Finish page
-!define MUI_FINISHPAGE_RUN "$INSTDIR\tuttifruchii.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\TuttiFruchii.exe"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -124,9 +124,9 @@ Section "Base"
   File /r "${BINARY_SOURCE_DIR}\*"
 
   ; Create start menu and desktop shortcuts
-  CreateShortCut "$SMPROGRAMS\$(^Name).lnk" "$INSTDIR\tuttifruchii.exe"
+  CreateShortCut "$SMPROGRAMS\$(^Name).lnk" "$INSTDIR\TuttiFruchii.exe"
   ${If} $DesktopShortcut == 1
-    CreateShortCut "$DESKTOP\$(^Name).lnk" "$INSTDIR\tuttifruchii.exe"
+    CreateShortCut "$DESKTOP\$(^Name).lnk" "$INSTDIR\TuttiFruchii.exe"
   ${EndIf}
 SectionEnd
 
@@ -135,12 +135,12 @@ SectionEnd
 Section -Post
   WriteUninstaller "$INSTDIR\uninst.exe"
 
-  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\tuttifruchii.exe"
+  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\TuttiFruchii.exe"
 
   ; Write metadata for add/remove programs applet
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayName" "$(^Name)"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
-  WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\tuttifruchii.exe"
+  WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\TuttiFruchii.exe"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "InstallLocation" "$INSTDIR"
@@ -152,8 +152,8 @@ Section -Post
   WriteRegStr HKCU "Software\Classes\.xci" "" "$(^Name)"
   WriteRegStr HKCU "Software\Classes\.nro" "" "$(^Name)"
   WriteRegStr HKCU "Software\Classes\.kip" "" "$(^Name)"
-  WriteRegStr HKCU "Software\Classes\$(^Name)\DefaultIcon" "" "$INSTDIR\tuttifruchii.exe,0"
-  WriteRegStr HKCU "Software\Classes\$(^Name)\Shell\open\command" "" '"$INSTDIR\tuttifruchii.exe" %1'
+  WriteRegStr HKCU "Software\Classes\$(^Name)\DefaultIcon" "" "$INSTDIR\TuttiFruchii.exe,0"
+  WriteRegStr HKCU "Software\Classes\$(^Name)\Shell\open\command" "" '"$INSTDIR\TuttiFruchii.exe" %1'
 SectionEnd
 
 Section Uninstall
@@ -161,7 +161,7 @@ Section Uninstall
   Delete "$SMPROGRAMS\$(^Name).lnk"
 
   ; Be a bit careful to not delete files a user may have put into the install directory.
-  Delete "$INSTDIR\tuttifruchii.exe"
+  Delete "$INSTDIR\TuttiFruchii.exe"
   Delete "$INSTDIR\eden-cli.exe"
   Delete "$INSTDIR\uninst.exe"
   Delete "$INSTDIR\LICENSE.txt"

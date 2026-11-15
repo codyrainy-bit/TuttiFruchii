@@ -5,34 +5,34 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-<h2 align="center">tuttifruchii has no official website</h2>
+<h2 align="center">TuttiFruchii has no official website</h2>
 
 > [!CAUTION]
-> **Download tuttifruchii only from this repository's [releases page](https://github.com/codyrainy-bit/tuttifruchii/releases).** This fork runs no website. Upstream Lichii's community compatibility site, [lichii.zortos.me](https://lichii.zortos.me), is for compatibility reports only.
+> **Download TuttiFruchii only from this repository's [releases page](https://github.com/codyrainy-bit/TuttiFruchii/releases).** This fork runs no website. Upstream Lichii's community compatibility site, [lichii.zortos.me](https://lichii.zortos.me), is for compatibility reports only.
 
 <p align="center">
-  <img src="dist/branding/tuttifruchii_icon.png" alt="tuttifruchii" width="320">
+  <img src="dist/branding/TuttiFruchii_icon.png" alt="TuttiFruchii" width="320">
 </p>
 
-# tuttifruchii
+# TuttiFruchii
 
-tuttifruchii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
+TuttiFruchii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
 
-This is an independent fork, not an official release of those upstream projects. tuttifruchii is not affiliated with Nintendo.
+This is an independent fork, not an official release of those upstream projects. TuttiFruchii is not affiliated with Nintendo.
 
-Visit the [tuttifruchii game compatibility website](https://lichii.zortos.me) to find games and compare community compatibility reports.
+Visit the [TuttiFruchii game compatibility website](https://lichii.zortos.me) to find games and compare community compatibility reports.
 
 ## Downloads and setup
 
-Download tuttifruchii only from this repository's [releases page](https://github.com/zortos293/Lichii/releases). tuttifruchii has no other download site: archives offered elsewhere, such as lichii.org, are not built by this project, and one has been reported to install malware ([#545](https://github.com/zortos293/Lichii/issues/545)).
+Download TuttiFruchii only from this repository's [releases page](https://github.com/zortos293/Lichii/releases). TuttiFruchii has no other download site: archives offered elsewhere, such as lichii.org, are not built by this project, and one has been reported to install malware ([#545](https://github.com/zortos293/Lichii/issues/545)).
 
-On Windows, extract the entire build archive and run **tuttifruchii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
+On Windows, extract the entire build archive and run **TuttiFruchii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
 
 ### Existing saves and settings
 
-tuttifruchii uses its own profile: `%APPDATA%\lichii` on Windows, and the `lichii` directories under `$XDG_DATA_HOME`, `$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME` on Linux and macOS. Without XDG overrides, these are `~/.local/share/lichii`, `~/.config/lichii` and `~/.cache/lichii`. An existing portable `user/` directory still takes priority and is not imported or changed by the wizard.
+TuttiFruchii uses its own profile: `%APPDATA%\lichii` on Windows, and the `lichii` directories under `$XDG_DATA_HOME`, `$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME` on Linux and macOS. Without XDG overrides, these are `~/.local/share/lichii`, `~/.config/lichii` and `~/.cache/lichii`. An existing portable `user/` directory still takes priority and is not imported or changed by the wizard.
 
-On the first non-portable GUI launch, tuttifruchii offers to import Eden and other detected emulator profiles. Back up `%APPDATA%\eden` first on Windows, or the old data, config and cache directories on Unix, and close the source emulator. Choose **Keep Old Data** to copy without changing the source, then check your saves and relaunch. Existing destination data is retained in backup directories rather than merged. Move also retains a source backup until you remove it yourself; Link deliberately shares settings and saves. Paths outside the imported data root remain shared and unchanged. An interrupted import offers recovery on the next launch. `eden-cli`, including `--help` and `--version`, refuses to initialize configuration until you import or explicitly choose **Start fresh** in the GUI.
+On the first non-portable GUI launch, TuttiFruchii offers to import Eden and other detected emulator profiles. Back up `%APPDATA%\eden` first on Windows, or the old data, config and cache directories on Unix, and close the source emulator. Choose **Keep Old Data** to copy without changing the source, then check your saves and relaunch. Existing destination data is retained in backup directories rather than merged. Move also retains a source backup until you remove it yourself; Link deliberately shares settings and saves. Paths outside the imported data root remain shared and unchanged. An interrupted import offers recovery on the next launch. `eden-cli`, including `--help` and `--version`, refuses to initialize configuration until you import or explicitly choose **Start fresh** in the GUI.
 
 ## Compatibility and issue reports
 
@@ -40,7 +40,7 @@ Compatibility and performance vary by game, hardware and driver. Rendering error
 
 Browse [community compatibility reports](https://lichii.zortos.me/reports) for results with each player's build and setup.
 
-Desktop reporting requires a build containing [PR #303](https://github.com/zortos293/Lichii/pull/303) and is not available in build 88. In builds that include it, play and stop a Switch 2 game, then right-click that game and choose **Submit compatibility report**. Only the latest session in the current tuttifruchii process is eligible.
+Desktop reporting requires a build containing [PR #303](https://github.com/zortos293/Lichii/pull/303) and is not available in build 88. In builds that include it, play and stop a Switch 2 game, then right-click that game and choose **Submit compatibility report**. Only the latest session in the current TuttiFruchii process is eligible.
 
 Confirm the matching website catalog entry and review the editable machine, game, setup, and enabled add-on details prefilled where available. Check the public preview and give explicit consent before submitting. Nothing uploads automatically, and the native v1 reporter does not read or upload logs or files.
 
@@ -54,16 +54,16 @@ Do not upload game files, keys, firmware or private account information.
 
 ## Building and contributing
 
-See the [build guide](docs/Build.md), [user documentation](docs/user/README.md) and [coding guidelines](docs/Coding.md). Some inherited documentation and internal build target names still use upstream names. The GUI build target is `lichii`; its output is `tuttifruchii.exe` on Windows and `lichii` on other desktop platforms.
+See the [build guide](docs/Build.md), [user documentation](docs/user/README.md) and [coding guidelines](docs/Coding.md). Some inherited documentation and internal build target names still use upstream names. The GUI build target is `lichii`; its output is `TuttiFruchii.exe` on Windows and `lichii` on other desktop platforms.
 
 Keep changes focused and distinguish code-level checks from actual gameplay testing.
 
 ## Artwork
 Art created by YOB (yobslab)
-The supplied tuttifruchii logo, icon and library artwork are in [dist/branding](dist/branding). Windows, Linux and macOS icon resources are generated from that artwork by [Generate-tuttifruchiiIcons.ps1](tools/Generate-tuttifruchiiIcons.ps1).
+The supplied TuttiFruchii logo, icon and library artwork are in [dist/branding](dist/branding). Windows, Linux and macOS icon resources are generated from that artwork by [Generate-TuttiFruchiiIcons.ps1](tools/Generate-TuttiFruchiiIcons.ps1).
 
 ## Credits and license
 
-tuttifruchii inherits the work of the Eglantine, Eden, yuzu and Sudachi projects and their contributors, including Eglantine's original developer Camille LaVey. Original copyright notices and third-party licenses are retained.
+TuttiFruchii inherits the work of the Eglantine, Eden, yuzu and Sudachi projects and their contributors, including Eglantine's original developer Camille LaVey. Original copyright notices and third-party licenses are retained.
 
 See [LICENSE.txt](LICENSE.txt) and the source files for applicable license terms.

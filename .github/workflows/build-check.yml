@@ -260,15 +260,15 @@ jobs:
           cmake --build build --parallel
           ccache --show-stats -v
 
-      # nxformat is linked statically: tuttifruchii.exe must not need an nxformat.dll, which Windows
+      # nxformat is linked statically: TuttiFruchii.exe must not need an nxformat.dll, which Windows
       # may refuse to load (Smart App Control, code integrity policies) or that may be missing.
-      - name: Check tuttifruchii.exe does not import nxformat.dll
+      - name: Check TuttiFruchii.exe does not import nxformat.dll
         run: |
-          imports=$("$LLVM_ROOT/bin/llvm-readobj" --coff-imports build/bin/tuttifruchii.exe |
+          imports=$("$LLVM_ROOT/bin/llvm-readobj" --coff-imports build/bin/TuttiFruchii.exe |
             awk '/^(Import|DelayImport) {/ { kind = $1 } /^  Name:/ { print kind, $2 }')
           echo "$imports"
           if grep -qi ' nxformat.dll$' <<< "$imports"; then
-            echo "::error::tuttifruchii.exe imports nxformat.dll; nxformat must be linked statically"
+            echo "::error::TuttiFruchii.exe imports nxformat.dll; nxformat must be linked statically"
             exit 1
           fi
 

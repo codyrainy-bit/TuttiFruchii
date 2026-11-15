@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-  <string>tuttifruchii</string>
+  <string>TuttiFruchii</string>
   </property>
   <property name="windowIcon">
    <iconset resource="lichii.qrc">
@@ -59,7 +59,7 @@
     </widget>
     <widget class="QMenu" name="menuOpen_Eden_Folders">
      <property name="title">
-      <string>Open &amp;tuttifruchii Folders</string>
+      <string>Open &amp;TuttiFruchii Folders</string>
      </property>
      <addaction name="action_Root_Data_Folder"/>
      <addaction name="action_NAND_Folder"/>
@@ -297,12 +297,12 @@
   </action>
   <action name="action_Whats_New">
    <property name="text">
-    <string>&amp;What's New in tuttifruchii</string>
+    <string>&amp;What's New in TuttiFruchii</string>
    </property>
   </action>
   <action name="action_About">
    <property name="text">
-    <string>&amp;About tuttifruchii</string>
+    <string>&amp;About TuttiFruchii</string>
    </property>
   </action>
   <action name="action_Single_Window_Mode">
@@ -583,7 +583,7 @@
   </action>
   <action name="action_Eden_Dependencies">
    <property name="text">
-    <string>&amp;tuttifruchii Dependencies</string>
+    <string>&amp;TuttiFruchii Dependencies</string>
    </property>
   </action>
   <action name="action_Data_Manager">

@@ -31,7 +31,7 @@ lacks the space, the filesystem cannot do sparse files, or a writable guest allo
 
 **Low VRAM:** the Fritchii #55 defaults, including ASTC trim when the reported budget is under 5 GiB.
 
-**Name and icon:** the product is now TuttiFruchii, the binary is `tuttifruchii.exe`, and it carries the new
+**Name and icon:** the product is now TuttiFruchii, the binary is `TuttiFruchii.exe`, and it carries the new
 icon. The data directory is still `%APPDATA%\lichii`, so an existing config, saves and precompiled store keep
 working.
 
