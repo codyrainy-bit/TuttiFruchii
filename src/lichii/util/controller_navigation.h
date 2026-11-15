@@ -28,6 +28,9 @@ public:
 
 signals:
     void TriggerKeyboardEvent(Qt::Key key);
+    /// A button or direction that sent TriggerKeyboardEvent was let go. Qt::Key_unknown: the
+    /// stick went back to the centre (every direction is released).
+    void TriggerKeyboardRelease(Qt::Key key);
 
 private:
     void TriggerButton(Settings::NativeButton::Values native_button, Qt::Key key);

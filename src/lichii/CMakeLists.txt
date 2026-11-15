@@ -259,6 +259,7 @@ add_executable(lichii
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
     game/common.h
     game/carousel.h game/carousel.cpp
+    game/game_home.h game/game_home.cpp
 )
 
 # Windows ships as TuttiFruchii.exe; the other platforms keep the lichii binary name their

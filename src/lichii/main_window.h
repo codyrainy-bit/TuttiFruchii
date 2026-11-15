@@ -450,6 +450,9 @@ private slots:
     void SetGridView();
     void SetTreeView();
     void SetCarouselView();
+    void SetHomeView();
+    /// Hands the home view the menus and the quick-setting chips (the status bar's settings).
+    void SetupHomeView();
 
     void CheckIconSize();
     void ToggleShowGameName();

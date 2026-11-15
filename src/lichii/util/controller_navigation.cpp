@@ -31,8 +31,13 @@ void ControllerNavigation::UnloadController() {
 
 void ControllerNavigation::TriggerButton(Settings::NativeButton::Values native_button,
                                          Qt::Key key) {
-    if (button_values[native_button].value && !button_values[native_button].locked) {
+    if (button_values[native_button].locked) {
+        return;
+    }
+    if (button_values[native_button].value) {
         emit TriggerKeyboardEvent(key);
+    } else {
+        emit TriggerKeyboardRelease(key);
     }
 }
 
@@ -75,6 +80,11 @@ void ControllerNavigation::ControllerUpdateButton() {
         TriggerButton(Settings::NativeButton::DLeft, Qt::Key_Left);
         TriggerButton(Settings::NativeButton::DRight, Qt::Key_Right);
         TriggerButton(Settings::NativeButton::DUp, Qt::Key_Up);
+        // X and + open a game's options, L and R jump through the home screen's games.
+        TriggerButton(Settings::NativeButton::X, Qt::Key_Menu);
+        TriggerButton(Settings::NativeButton::Plus, Qt::Key_Menu);
+        TriggerButton(Settings::NativeButton::L, Qt::Key_PageUp);
+        TriggerButton(Settings::NativeButton::R, Qt::Key_PageDown);
         break;
     case Core::HID::NpadStyleIndex::JoyconLeft:
         TriggerButton(Settings::NativeButton::DDown, Qt::Key_Enter);
@@ -111,6 +121,14 @@ void ControllerNavigation::ControllerUpdateStick() {
     }
 
     if (!update) {
+        return;
+    }
+
+    const auto& lstick = stick_values[Settings::NativeAnalog::LStick];
+    const auto& rstick = stick_values[Settings::NativeAnalog::RStick];
+    if (!lstick.left && !lstick.right && !lstick.up && !lstick.down && !rstick.left &&
+        !rstick.right && !rstick.up && !rstick.down) {
+        emit TriggerKeyboardRelease(Qt::Key_unknown);
         return;
     }
 
