@@ -758,6 +758,25 @@
      </layout>
     </item>
     <item>
+     <widget class="QGroupBox" name="memory_group">
+      <property name="title">
+       <string>Guest Memory (experimental)</string>
+      </property>
+      <layout class="QVBoxLayout" name="memory_group_layout">
+       <item>
+        <widget class="QCheckBox" name="nx2_dynamic_memory">
+         <property name="toolTip">
+          <string>Windows only. Backs the guest's memory with a sparse temporary file instead of committing all of it (14 GiB for a Switch 2 game) when the game starts. Only useful when Windows runs out of commit (small or fixed page file): it does not lower RAM use, and under memory pressure Windows writes the game's memory to that file, which can stutter. Needs as much free space on the drive of the temporary folder. Takes effect the next time a game starts.</string>
+         </property>
+         <property name="text">
+          <string>Dynamic guest memory (sparse file, no commit)</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
      <spacer name="verticalSpacer">
       <property name="orientation">
        <enum>Qt::Orientation::Vertical</enum>

@@ -93,6 +93,9 @@ void ConfigureDebug::SetConfiguration() {
     ui->disable_loop_safety_checks->setChecked(
         Settings::values.disable_shader_loop_safety_checks.GetValue());
     ui->perform_vulkan_check->setChecked(Settings::values.perform_vulkan_check.GetValue());
+    // The guest's memory is set up when a game starts, so this is locked while one runs.
+    ui->nx2_dynamic_memory->setEnabled(runtime_lock);
+    ui->nx2_dynamic_memory->setChecked(Settings::values.nx2_dynamic_memory.GetValue());
     ui->debug_knobs_spinbox->setValue(Settings::values.debug_knobs.GetValue());
 
     ui->gpu_log_level->setEnabled(runtime_lock);
@@ -137,6 +140,7 @@ void ConfigureDebug::ApplyConfiguration() {
     Settings::values.disable_macro_hle = ui->disable_macro_hle->isChecked();
     Settings::values.extended_logging = ui->extended_logging->isChecked();
     Settings::values.perform_vulkan_check = ui->perform_vulkan_check->isChecked();
+    Settings::values.nx2_dynamic_memory = ui->nx2_dynamic_memory->isChecked();
     Settings::values.disable_web_applet = ui->disable_web_applet->isChecked();
     Settings::values.serial_battery = ui->serial_battery_edit->text().toUInt();
     Settings::values.serial_unit = ui->serial_board_edit->text().toUInt();

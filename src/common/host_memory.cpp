@@ -12,8 +12,10 @@
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
 #include <psapi.h>
+#include <winioctl.h>
 #include <vector>
 #include "common/dynamic_library.h"
+#include "common/settings.h"
 
 #else // ^^^ Windows ^^^ vvv POSIX vvv
 
@@ -156,6 +158,75 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
     }
 }
 
+/// Experimental (nx2_dynamic_memory): a sparse temporary file to back the guest's memory with. A
+/// pagefile-backed SEC_COMMIT section charges every byte to the commit limit when it is created,
+/// 14 GiB for a Switch 2 title, whatever the game touches. A file-backed section charges none.
+/// What that costs: a page the guest wrote can only leave RAM by being written to this file, and
+/// that includes the pages it only cleared, which Windows drops for free from a pagefile-backed
+/// section. So the volume must have room for all of it, or the writes fail once it fills and the
+/// pages can no longer leave RAM: without that room, or without sparse files (FAT, exFAT), the
+/// caller keeps the committed section. Returns INVALID_HANDLE_VALUE then.
+/// The handle must stay open as long as the section: the file is deleted when it closes, and
+/// closed earlier, with the section still mapped, the delete does not happen and every session
+/// leaves gigabytes behind in the temporary directory.
+static HANDLE CreateSparseBackingFile(size_t size) {
+    wchar_t temp_path[MAX_PATH + 1]{};
+    const DWORD temp_length = GetTempPathW(MAX_PATH + 1, temp_path);
+    if (temp_length == 0 || temp_length > MAX_PATH) {
+        LOG_WARNING(HW_Memory, "Dynamic guest memory: no temporary directory (error {})",
+                    GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+    constexpr u64 FreeSpaceMargin = u64{2} << 30;
+    ULARGE_INTEGER free_bytes{};
+    if (!GetDiskFreeSpaceExW(temp_path, &free_bytes, nullptr, nullptr)) {
+        LOG_WARNING(HW_Memory, "Dynamic guest memory: could not read the free space of the "
+                               "temporary directory (error {})",
+                    GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+    if (free_bytes.QuadPart < static_cast<u64>(size) + FreeSpaceMargin) {
+        LOG_WARNING(HW_Memory,
+                    "Dynamic guest memory: the temporary directory's drive has {} MiB free and "
+                    "{} MiB are needed",
+                    free_bytes.QuadPart >> 20, (static_cast<u64>(size) + FreeSpaceMargin) >> 20);
+        return INVALID_HANDLE_VALUE;
+    }
+    static std::atomic<unsigned> serial{};
+    wchar_t file_path[MAX_PATH + 64]{};
+    if (swprintf_s(file_path, std::size(file_path), L"%lslichii-guest-%lu-%u.bin", temp_path,
+                   GetCurrentProcessId(), serial.fetch_add(1)) <= 0) {
+        return INVALID_HANDLE_VALUE;
+    }
+    // Not shared: nothing else may open, map or delete the guest's memory.
+    const HANDLE file =
+        CreateFileW(file_path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        LOG_WARNING(HW_Memory, "Dynamic guest memory: could not create the file (error {})",
+                    GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+    // Without the sparse attribute, sizing the file below allocates all of it on the disk.
+    DWORD returned{};
+    if (!DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr)) {
+        LOG_WARNING(HW_Memory, "Dynamic guest memory: the temporary directory's file system has "
+                               "no sparse files (error {})",
+                    GetLastError());
+        CloseHandle(file);
+        return INVALID_HANDLE_VALUE;
+    }
+    LARGE_INTEGER end{};
+    end.QuadPart = static_cast<LONGLONG>(size);
+    if (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file)) {
+        LOG_WARNING(HW_Memory, "Dynamic guest memory: could not size the file to {} MiB (error {})",
+                    size >> 20, GetLastError());
+        CloseHandle(file);
+        return INVALID_HANDLE_VALUE;
+    }
+    return file;
+}
+
 class HostMemory::Impl {
 public:
     explicit Impl(size_t backing_size_, size_t virtual_size_)
@@ -184,6 +255,39 @@ public:
         if (!pfn_CreateFileMapping2 || !pfn_VirtualAlloc2 || !pfn_MapViewOfFile3 || !pfn_UnmapViewOfFile2) {
             LOG_CRITICAL(HW_Memory, "Failed to find functions for virtual allocs");
             return false;
+        }
+
+        // Experimental: nx2_dynamic_memory, or EDEN_NX2_DYNAMIC_MEMORY=1 (0 forces it off), backs
+        // the guest's memory with a sparse temporary file (see CreateSparseBackingFile). When that
+        // cannot be set up, the committed section below is made as always.
+        const bool dynamic_memory = [] {
+            if (const char* const value = std::getenv("EDEN_NX2_DYNAMIC_MEMORY")) {
+                return value[0] != '\0' && value[0] != '0';
+            }
+            return Settings::values.nx2_dynamic_memory.GetValue();
+        }();
+        if (dynamic_memory && !allocation_test_control) {
+            backing_file = CreateSparseBackingFile(backing_size);
+            if (backing_file != INVALID_HANDLE_VALUE) {
+                backing_handle = pfn_CreateFileMapping2(backing_file, nullptr,
+                                                        FILE_MAP_WRITE | FILE_MAP_READ,
+                                                        PAGE_READWRITE, 0, backing_size, nullptr,
+                                                        nullptr, 0);
+                if (!backing_handle) {
+                    LOG_WARNING(HW_Memory, "Dynamic guest memory: could not map the file (error {})",
+                                GetLastError());
+                    CloseHandle(backing_file);
+                    backing_file = INVALID_HANDLE_VALUE;
+                }
+            }
+            if (backing_handle) {
+                LOG_INFO(HW_Memory, "Dynamic guest memory: {} MiB backed by a sparse temporary "
+                                    "file, no commit charged for them",
+                         backing_size >> 20);
+            } else {
+                LOG_WARNING(HW_Memory, "Dynamic guest memory is not available: committing the "
+                                       "guest's memory as usual");
+            }
         }
 
         // Allocate backing file map. SEC_COMMIT charges all of it to the commit limit up front, and
@@ -439,6 +543,11 @@ public:
     u8* backing_base{};
     u8* virtual_base{};
 
+    /// Whether a temporary file backs the guest's memory instead of the page file.
+    [[nodiscard]] bool IsFileBacked() const noexcept {
+        return backing_file != INVALID_HANDLE_VALUE;
+    }
+
 private:
     /// Release all resources in the object
     void Release() {
@@ -471,6 +580,13 @@ private:
                 LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
             }
             backing_handle = nullptr;
+        }
+        // After the section: closing this handle deletes the file (see CreateSparseBackingFile).
+        if (backing_file != INVALID_HANDLE_VALUE) {
+            if (!CloseHandle(backing_file)) {
+                LOG_CRITICAL(HW_Memory, "Failed to close the guest memory file");
+            }
+            backing_file = INVALID_HANDLE_VALUE;
         }
     }
 
@@ -667,6 +783,7 @@ private:
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
+    HANDLE backing_file{INVALID_HANDLE_VALUE}; ///< nx2_dynamic_memory: the file behind it
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};
@@ -1398,6 +1515,12 @@ u64 HostMemory::MappedBytes() noexcept {
 std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
 #ifdef _WIN32
     if (backing_base == nullptr) {
+        return {0, 0};
+    }
+    // A page of a file-backed section that leaves the working set is not dropped for being zero:
+    // it is queued to be written to the file. Trimming would only turn cleared pages into disk
+    // writes and page faults.
+    if (impl && impl->IsFileBacked()) {
         return {0, 0};
     }
     // A pass gives way to a guest that starts mapping or unmapping memory meanwhile: what it holds

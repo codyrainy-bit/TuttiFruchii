@@ -216,6 +216,10 @@ struct Values {
                                                              Category::Core,
                                                              Specialization::Default,
                                                              true};
+    /// Experimental, Windows: back the guest's memory with a sparse temporary file instead of a
+    /// section committed in full at boot (14 GiB for a Switch 2 title), so it takes no commit.
+    /// Read when a game starts. See CreateSparseBackingFile for what it costs.
+    Setting<bool> nx2_dynamic_memory{linkage, false, "nx2_dynamic_memory", Category::Core};
     SwitchableSetting<bool> use_speed_limit{
                                             linkage, true, "use_speed_limit", Category::Core, Specialization::Paired, true, true};
 
