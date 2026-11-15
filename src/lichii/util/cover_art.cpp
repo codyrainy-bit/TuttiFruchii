@@ -42,7 +42,8 @@ constexpr std::string_view EshopImageOrigin = "https://www.nintendo.com";
 
 constexpr std::size_t MaxImageBytes = 8 * 1024 * 1024;
 constexpr std::size_t MaxSearchBytes = 512 * 1024;
-constexpr int CoverSide = 512; // The library shows covers at up to 512 pixels.
+// The home view shows covers at up to 440 logical pixels, ~900 on a high-DPI screen.
+constexpr int CoverSide = 1024;
 constexpr int BannerWidth = 1920;
 constexpr int BannerHeight = 1080;
 
@@ -115,20 +116,23 @@ Fetch GetImage(std::string_view origin, const std::string& path, const std::atom
     return Fetch::Ok;
 }
 
-bool SaveJpeg(const std::filesystem::path& path, const QImage& image) {
+bool SaveJpeg(const std::filesystem::path& path, const QImage& image, int quality = 90) {
     if (!Common::FS::CreateDirs(path.parent_path())) {
         return false;
     }
     // Written to a temporary file and swapped in, so a failed save never leaves a broken image.
     QSaveFile file(QString::fromStdString(Common::FS::PathToUTF8String(path)));
     return file.open(QIODevice::WriteOnly) &&
-           image.convertToFormat(QImage::Format_RGB888).save(&file, "JPG", 90) && file.commit();
+           image.convertToFormat(QImage::Format_RGB888).save(&file, "JPG", quality) &&
+           file.commit();
 }
 
 bool SaveCover(u64 program_id, const QImage& cover) {
-    return SaveJpeg(
-        QtCommon::Game::DownloadedCoverPath(program_id),
-        cover.scaled(CoverSide, CoverSide, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    // Square, never enlarged: an upscaled picture only looks blurrier on a big card.
+    const int side = std::min(CoverSide, std::max(cover.width(), cover.height()));
+    return SaveJpeg(QtCommon::Game::DownloadedCoverPath(program_id),
+                    cover.scaled(side, side, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
+                    94);
 }
 
 bool SaveBanner(u64 program_id, const QImage& banner) {
@@ -187,11 +191,17 @@ int MatchScore(const QString& wanted, const QString& candidate) {
     return 0;
 }
 
-/// The eShop's "500w" picture in another width, or the same URL when it has no width.
+/// The eShop's "500w" picture in another width, or the same URL when it has no width. "full" is
+/// the picture as uploaded (the name without "_image500w"; 1080x1080 for square covers).
 std::string ResizedImageUrl(const std::string& url, std::string_view width) {
     std::string out = url;
     if (const auto at = out.rfind("image500w"); at != std::string::npos) {
-        out.replace(at + 5, 4, width);
+        if (width == "full") {
+            const auto start = at > 0 && out[at - 1] == '_' ? at - 1 : at;
+            out.erase(start, at + 9 - start);
+        } else {
+            out.replace(at + 5, 4, width);
+        }
     }
     return out;
 }
@@ -288,20 +298,21 @@ std::optional<EshopArt> FindEshopArt(u64 program_id, const std::string& title,
     return best;
 }
 
-/// GETs an eShop picture, first in the given larger width, then as listed.
-Fetch GetEshopImage(const std::string& url, std::string_view larger_width,
+/// GETs an eShop picture, first in the given larger widths in order, then as listed.
+Fetch GetEshopImage(const std::string& url, std::initializer_list<std::string_view> larger_widths,
                     const std::atomic_bool& cancel, QImage& image, std::string& detail) {
     const std::string path = EshopImagePath(url);
     if (path.empty()) {
         return Fetch::NotFound;
     }
-    if (!larger_width.empty()) {
-        const std::string larger = EshopImagePath(ResizedImageUrl(url, larger_width));
-        if (larger != path) {
-            const Fetch fetch = GetImage(EshopImageOrigin, larger, cancel, image, detail);
-            if (fetch != Fetch::NotFound) {
-                return fetch;
-            }
+    for (const std::string_view width : larger_widths) {
+        const std::string larger = EshopImagePath(ResizedImageUrl(url, width));
+        if (larger.empty() || larger == path) {
+            continue;
+        }
+        const Fetch fetch = GetImage(EshopImageOrigin, larger, cancel, image, detail);
+        if (fetch != Fetch::NotFound) {
+            return fetch;
         }
     }
     return GetImage(EshopImageOrigin, path, cancel, image, detail);
@@ -363,7 +374,10 @@ Result Download(u64 program_id, const std::string& title, const std::atomic_bool
         }
         if (art && !result.cover_saved && !art->square.empty()) {
             QImage cover;
-            if (settle(GetEshopImage(art->square, {}, cancel, cover, result.detail))) {
+            // The listed square picture is 500 pixels wide: the full one (1080) or the 950 one is
+            // sharp on a big card.
+            if (settle(GetEshopImage(art->square, {"full", "950w"}, cancel, cover,
+                                     result.detail))) {
                 return result;
             }
             if (!cover.isNull()) {
@@ -372,7 +386,7 @@ Result Download(u64 program_id, const std::string& title, const std::atomic_bool
         }
         if (art && !result.banner_saved && !art->wide.empty()) {
             QImage banner;
-            if (settle(GetEshopImage(art->wide, "1600w", cancel, banner, result.detail))) {
+            if (settle(GetEshopImage(art->wide, {"1600w"}, cancel, banner, result.detail))) {
                 return result;
             }
             if (!banner.isNull()) {
