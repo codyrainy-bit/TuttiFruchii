@@ -283,6 +283,8 @@ jobs:
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }}
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
+            # x86-64-v3 = AVX2, BMI1/2, FMA and F16C. The published builds need an AVX2 CPU.
+            -DLICHII_BUILD_PRESET=v3
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
             # Same flags Eden's CI passes for its clang PGO build.
@@ -312,6 +314,7 @@ jobs:
             flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
             flags+=" -Wno-error=backend-plugin"
           fi
+          # x86-64-v3 = AVX2, BMI1/2, FMA and F16C: the published builds need an AVX2 CPU.
           cmake -S . -B build/release -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
@@ -325,6 +328,7 @@ jobs:
             -DENABLE_UPDATE_CHECKER=ON \
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
+            -DLICHII_BUILD_PRESET=v3 \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
