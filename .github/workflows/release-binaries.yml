@@ -665,31 +665,10 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
 
           link() { [[ -e "dist/$2" ]] && echo "[$1](${base}/$2)" || true; }
-          appimage_tar() {
-            local appimage tar
-            appimage=$(link AppImage "$1.AppImage")
-            tar=$(link tar.gz "$1.tar.gz")
-            echo "${appimage}${appimage:+${tar:+ · }}${tar}"
-          }
           has_pgo=$(compgen -G 'dist/*-pgo.*' || true)
-          row() {
-            [[ -z "$2$3" ]] && return 0
-            if [[ -n "$has_pgo" ]]; then echo "| $1 | $2 | $3 | $4 |"; else echo "| $1 | $2 | $4 |"; fi
-          }
-          table() {
-            local rows
-            rows=$(cat)
-            [[ -z "$rows" ]] && return 0
-            if [[ -n "$has_pgo" ]]; then
-              printf '| Build Type | Standard | PGO (Recommended) | Notes |\n| --- | --- | --- | --- |\n'
-            else
-              printf '| Build Type | Standard | Notes |\n| --- | --- | --- |\n'
-            fi
-            echo "$rows"
-          }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
+            pgo_note="These are profile-guided builds: the same programs recompiled using a profile taken from real play. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less."
           fi
 
           cat > notes.md <<EOF
@@ -697,24 +676,17 @@ jobs:
 
           ## Linux
 
-          Linux packages come as an AppImage and a tar.gz. Both are self-contained and need glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch). The tar.gz holds the same files unpacked, for systems without FUSE: extract it and run \`lichii/lichii\`.
+          $(link AppImage lichii-linux-x86_64-pgo.AppImage) · $(link tar.gz lichii-linux-x86_64-pgo.tar.gz)
 
-          $({
-            row amd64 "$(appimage_tar lichii-linux-x86_64)" "$(appimage_tar lichii-linux-x86_64-pgo)" "Make the AppImage executable (\`chmod +x\`) and run it"
-            row "ARM (aarch64)" "$(appimage_tar lichii-linux-aarch64)" "$(appimage_tar lichii-linux-aarch64-pgo)" ""
-          } | table)
+          The AppImage is self-contained: make it executable (\`chmod +x\`) and run it. The tar.gz holds the same files unpacked, for systems without FUSE: extract it and run \`lichii/lichii\`. Needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch).
 
           ## Windows
 
-          Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
+          $(link zip lichii-windows-x86_64-pgo.zip)
 
-          $({
-            row "amd64 / x86_64" "$(link zip lichii-windows-x86_64.zip)" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Both built with clang-cl and ThinLTO; the PGO zip adds a profile trained on Ocarina of Time"
-          } | table)
+          Extract the zip and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
 
-          ## macOS
-
-          $(row "arm64 (Apple Silicon)" "$(link zip lichii-macos-arm64.zip)" "" "macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`" | table)
+          Both are x86-64-v3 builds, so they need an AVX2 CPU (Haswell or Excavator, 2013 or newer).
 
           ${pgo_note}
           EOF
@@ -722,7 +694,7 @@ jobs:
           gh release create "${tag}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --prerelease \
+            --latest \
             --title "Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
             --notes-file notes.md
 
