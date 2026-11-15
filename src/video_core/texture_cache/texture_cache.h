@@ -191,22 +191,20 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             collection_trace.aggressive += aggressive_mode ? 1 : 0;
         }
     };
-    const auto Cleanup = [this, &collection_budget, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly, out_of_memory](ImageId image_id) {
-        if (!collection_budget.Examine()) {
-            return true;
-        }
-        if (mem_trace_enabled) {
-            ++collection_trace.examined;
-        }
-        auto& image = slot_images[image_id];
+    const auto CanEvict = [this, &high_priority_mode, &aggressive_mode,
+                           &evict_old_costly](ImageId image_id, bool* out_must_download = nullptr) {
+        const auto& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             if (mem_trace_enabled) {
                 ++collection_trace.decoding;
             }
             return false;
         }
-        const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+        const bool must_download =
+            IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+        if (out_must_download != nullptr) {
+            *out_must_download = must_download;
+        }
         if (!aggressive_mode && !evict_old_costly &&
             True(image.flags & ImageFlagBits::CostlyLoad)) {
             if (mem_trace_enabled) {
@@ -220,6 +218,21 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             }
             return false;
         }
+        return true;
+    };
+    const auto Cleanup = [this, &collection_budget, &high_priority_mode, &aggressive_mode,
+                          &CanEvict, out_of_memory](ImageId image_id) {
+        if (!collection_budget.Examine()) {
+            return true;
+        }
+        if (mem_trace_enabled) {
+            ++collection_trace.examined;
+        }
+        bool must_download = false;
+        if (!CanEvict(image_id, &must_download)) {
+            return false;
+        }
+        auto& image = slot_images[image_id];
         OotWhiteout::Add(
             must_download ? OotWhiteout::Event::CollectDownload : OotWhiteout::Event::CollectDrop,
             image.gpu_addr, image.cpu_addr, image.guest_size_bytes, static_cast<u64>(image.flags));
@@ -241,6 +254,15 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
+        }
+        if constexpr (requires(const Image& img) { img.MemoryBlock(); }) {
+            const auto block = image.MemoryBlock();
+            if (block.block != 0) {
+                const auto it = block_image_bytes.find(block.block);
+                if (it != block_image_bytes.end()) {
+                    it->second -= (std::min)(it->second, block.size);
+                }
+            }
         }
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
         collection_budget.Deleted();
@@ -268,11 +290,12 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     // used). Among the oldest candidates (8 per image this pass may delete), those in the
     // emptiest blocks go first, so blocks drain and go back to the driver; placement already
     // prefers the fullest blocks (best fit). Images with memory of their own sit in the middle.
-    const auto Collect = [&] {
-        if (frame_tick < ticks_to_destroy) {
+    const auto Collect = [&](u64 age_override = 0) {
+        const u64 required_age = age_override != 0 ? age_override : ticks_to_destroy;
+        if (frame_tick < required_age) {
             return;
         }
-        const u64 last_tick = frame_tick - ticks_to_destroy;
+        const u64 last_tick = frame_tick - required_age;
         if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
             std::vector<ImageId> candidates;
             const size_t limit = collection_budget.scan_past_skips
@@ -282,7 +305,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
                 return;
             }
             lru_cache.ForEachItemBelow(last_tick, [&](ImageId image_id) {
-                candidates.push_back(image_id);
+                if (CanEvict(image_id)) {
+                    candidates.push_back(image_id);
+                }
                 return candidates.size() >= limit;
             });
             if (candidates.empty()) {
@@ -332,7 +357,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     }();
     if (high_priority_mode && old_age != 0 && frame_tick > old_age) {
         evict_old_costly = true;
-        lru_cache.ForEachItemBelow(frame_tick - old_age, Cleanup);
+        Collect(old_age);
         evict_old_costly = false;
     }
     Collect();
@@ -4646,7 +4671,8 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     } while (has_deleted_images);
     has_deleted_images = delete_state;
     if (!image_id) {
-        // A sampled null descriptor is a valid slot, but has no framebuffer attachment.
+        // No attachment rather than the null view: it has no render target view, and a
+        // framebuffer made with it hands the driver a null handle (AMD: access violation).
         return ImageViewId{};
     }
     Image& image = slot_images[image_id];

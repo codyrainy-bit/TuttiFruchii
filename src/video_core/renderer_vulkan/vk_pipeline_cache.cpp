@@ -450,9 +450,11 @@ void CountPrecompiledReason(const char* reason) {
     ++precompiled_reasons[reason];
 }
 
-// NX2INFO5: this tree's Shader::Info (NX2INFO4 plus handle_shader_hash, and the vertex write
-// extent's vertex_stride/guard_vertex_stride). A file of another version is prepared again.
-constexpr std::string_view PrecompiledInfosMagic{"NX2INFO5"};
+// NX2INFO6: this tree's Shader::Info after nx2 #1677, where removed_conditional_barrier became
+// demoted_conditional_barrier and nx2's uses_barrier_vote is carried too (NX2INFO5 plus those),
+// plus handle_shader_hash and the vertex write extent's vertex_stride/guard_vertex_stride. A file
+// of another version is prepared again.
+constexpr std::string_view PrecompiledInfosMagic{"NX2INFO6"};
 
 /// EDEN_NX2_PRECOMPILED_FAST=0: precompiled pipelines are translated on the GPU thread like the
 /// others (their kept infos and SPIR-V unused), to compare.
@@ -1016,6 +1018,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsUniformTexelBufferArrayNonUniformIndexingSupported(),
         .support_storage_texel_buffer_array_nonuniform_indexing =
             device.IsStorageTexelBufferArrayNonUniformIndexingSupported(),
+        .select_global_memory_buffer = driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+                                       device.IsNonUniformStorageBufferPointerSupported(),
 
         .warp_size_potentially_larger_than_guest = device.IsWarpSizePotentiallyBiggerThanGuest(),
 
@@ -1078,6 +1082,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_descriptor_set_sampled_images = device.GetMaxDescriptorSetSampledImages(),
         .max_descriptor_set_storage_images = device.GetMaxDescriptorSetStorageImages(),
         .max_descriptor_set_input_attachements = device.GetMaxDescriptorSetInputAttachments(),
+        .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
         .support_float64 = device.IsFloat64Supported(),
         .support_float16 = device.IsFloat16Supported(),
         .support_int64 = device.IsShaderInt64Supported(),
