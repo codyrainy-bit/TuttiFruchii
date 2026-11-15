@@ -5943,63 +5943,20 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    // Decode images are made a size class larger than the texture and reused by any later
-    // texture that fits, even while the GPU still works on their last decode: commands run in
-    // submission order and a reused image's decode starts with a barrier after the encoder's
-    // reads (initialized below). Exact shapes only matched a few textures: a zone change in
-    // title 1 made ~430 decode images (1.7 GB of dedicated allocations, ~220 ms) in a second.
-    const auto size_class = [](u32 size) {
-        return size <= 512 ? std::bit_ceil((std::max)(size, 4U)) : Common::AlignUp(size, 512U);
-    };
-    const u32 decode_width = size_class(width);
-    const u32 decode_height = size_class(height);
-    const u32 decode_levels =
-        (std::max)(levels, static_cast<u32>(std::bit_width((std::max)(decode_width, decode_height))));
-    // A decode of more than 128 MiB goes a batch of layers at a time through a smaller image:
-    // title 1's terrain material arrays (1365x1365x90, 11 levels) took an ~890 MiB decode image
-    // each, which stalled 80-230 ms with VRAM full and once landed in host memory.
-    constexpr u64 MaxDecodeBytes = u64{128} << 20;
-    u64 decode_layer_bytes = 0;
-    for (u32 level = 0; level < decode_levels; ++level) {
-        decode_layer_bytes += u64{(std::max)(decode_width >> level, 1U)} *
-                              (std::max)(decode_height >> level, 1U) * 4;
-    }
-    u32 batch = layers;
-    if (decode_layer_bytes * layers > MaxDecodeBytes && info.layer_stride != 0) {
-        batch = static_cast<u32>(std::clamp<u64>(MaxDecodeBytes / decode_layer_bytes, 1, layers));
-    }
-    const auto fits = [&](const PendingTranscode& t, u32 batch_layers) {
-        return t.width >= width && t.height >= height && t.levels >= levels &&
-               t.layers >= batch_layers;
-    };
-    const auto smaller = [](const PendingTranscode& a, const PendingTranscode& b) {
-        return u64{a.width} * a.height * a.layers < u64{b.width} * b.height * b.layers;
-    };
-    // The smallest image that fits: one the GPU is done with first, else one in flight.
-    const auto take = [&](u32 batch_layers, PendingTranscode& out) {
-        auto best_free = free_transcodes.end();
-        for (auto it = free_transcodes.begin(); it != free_transcodes.end(); ++it) {
-            if (fits(*it, batch_layers) && (best_free == free_transcodes.end() || smaller(*it, *best_free))) {
-                best_free = it;
-            }
+    // A decode image of the same shape the GPU is done with: title 1's title screen decodes
+    // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
+    // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
+    const auto take_free = [&](u32 batch_layers, PendingTranscode& out) {
+        const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
+            return t.width == width && t.height == height && t.levels == levels &&
+                   t.layers == batch_layers;
+        });
+        if (reusable == free_transcodes.end()) {
+            return false;
         }
-        if (best_free != free_transcodes.end()) {
-            out = std::move(*best_free);
-            free_transcodes.erase(best_free);
-            return true;
-        }
-        auto best_busy = pending_transcodes.end();
-        for (auto it = pending_transcodes.begin(); it != pending_transcodes.end(); ++it) {
-            if (fits(*it, batch_layers) && (best_busy == pending_transcodes.end() || smaller(*it, *best_busy))) {
-                best_busy = it;
-            }
-        }
-        if (best_busy != pending_transcodes.end()) {
-            out = std::move(*best_busy);
-            pending_transcodes.erase(best_busy);
-            return true;
-        }
-        return false;
+        out = std::move(*reusable);
+        free_transcodes.erase(reusable);
+        return true;
     };
     const auto make_decode = [&](u32 batch_layers) {
         const VkImageCreateInfo decode_ci{
@@ -6008,8 +5965,8 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .flags = 0,
             .imageType = VK_IMAGE_TYPE_2D,
             .format = DecodeFormat,
-            .extent = {decode_width, decode_height, 1},
-            .mipLevels = decode_levels,
+            .extent = {width, height, 1},
+            .mipLevels = levels,
             .arrayLayers = batch_layers,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -6021,15 +5978,22 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         };
         return memory_allocator.TryCreateImage(decode_ci, true);
     };
+    // The decode image holds RGBA8 for every layer at once: a 1365x1365 array of 90 layers with
+    // 11 levels is ~890 MiB in one allocation. On a full card that allocation failed on every use
+    // of the texture, forever (#1035). When the whole array does not fit, decode and encode it a
+    // few layers at a time through a smaller image; the encoded output is the same.
+    u32 batch = layers;
     PendingTranscode pending;
-    bool reused = take(batch, pending);
+    bool reused = take_free(batch, pending);
     if (!reused) {
         vk::Image decode = make_decode(batch);
-        // It does not fit (#1035). An image for fewer layers comes first, then the free images'
-        // memory goes back to the driver, then fewer layers a batch.
+        // The whole array does not fit. A free image with fewer layers comes first: a texture
+        // that was decoded in batches gets back the image its last upload used, and the rest of
+        // the pool is kept. Emptying the pool first destroyed that image on every upload, only
+        // to make the same one again.
         for (u32 fewer = batch; !decode && !reused && fewer > 1;) {
             fewer = Common::DivCeil(fewer, 2U);
-            if (take(fewer, pending)) {
+            if (take_free(fewer, pending)) {
                 batch = fewer;
                 reused = true;
             }
@@ -6055,18 +6019,27 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             TransitionImageLayout(image);
             return;
         }
+        if (batch != layers) {
+            static u32 batch_logged{};
+            if (batch_logged++ < 32) {
+                LOG_WARNING(Render_Vulkan,
+                            "ASTC image {:#x} ({}x{}, {} levels, {} layers) decoded {} layers at a "
+                            "time: not enough device memory for all of them",
+                            image.gpu_addr, width, height, levels, layers, batch);
+            }
+        }
         if (!reused) {
             pending = PendingTranscode{
                 .tick = 0,
                 .image = std::move(decode),
                 .views = {},
-                .width = decode_width,
-                .height = decode_height,
-                .levels = decode_levels,
+                .width = width,
+                .height = height,
+                .levels = levels,
                 .layers = batch,
                 .unused_frames = 0,
             };
-            for (u32 level = 0; level < decode_levels; ++level) {
+            for (u32 level = 0; level < levels; ++level) {
                 pending.views.push_back(
                     MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
             }
@@ -6135,9 +6108,9 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             ASTCDecoderPass::Target{
                 .image = *pending.image,
                 .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-                // A later batch overwrites what the previous batch's encode read, and a reused
-                // image may still be read by an encode in flight: the barrier waits for that.
-                .initialized = reused || base != 0,
+                // A later batch overwrites what the previous batch's encode read: its barrier
+                // waits for that (initialized).
+                .initialized = base != 0,
                 .level_view = [&pending](s32 level) { return *pending.views[level]; },
                 // Only the last batch submits. `map` carries this tick: a later batch reading it
                 // after a submit could find it freed, or refilled with the next upload.

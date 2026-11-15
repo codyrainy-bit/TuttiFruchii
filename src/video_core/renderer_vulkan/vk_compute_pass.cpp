@@ -200,7 +200,6 @@ struct AstcPushConstants {
     u32 block_height;
     u32 block_height_mask;
     u32 native_tiling;
-    std::array<u32, 2> level_extent; // texels of the decoded level; offset 32 like the shader
 };
 
 constexpr std::array<VkDescriptorSetLayoutBinding, 2> BC_ENCODER_DESCRIPTOR_SET_BINDINGS{{
@@ -1108,14 +1107,11 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
                 const void* const descriptor_data{compute_pass_descriptor_queue.UpdateData()};
                 auto params = MakeBlockLinearSwizzle2DParams(swizzle, info);
                 params.layer_stride = input_layer_stride;
-                const std::array<u32, 2> level_extent{
-                    (std::max)(info.size.width >> swizzle.level, 1U),
-                    (std::max)(info.size.height >> swizzle.level, 1U)};
                 const u32 num_dispatches_x = Common::DivCeil(swizzle.num_tiles.width, 8U);
                 const u32 num_dispatches_y = Common::DivCeil(swizzle.num_tiles.height, 8U);
                 VideoCommon::StreamStats::Add(StreamCounter::Dispatches);
                 scheduler.Record([this, num_dispatches_x, num_dispatches_y, block_dims, params,
-                                  level_extent, descriptor_data](vk::CommandBuffer cmdbuf) {
+                                  descriptor_data](vk::CommandBuffer cmdbuf) {
                     const VideoCommon::StreamStats::Scope worker_scope{
                         StreamCounter::DecodeWorkerNs};
                     const AstcPushConstants uniforms{
@@ -1126,7 +1122,6 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
                         .block_height = params.block_height,
                         .block_height_mask = params.block_height_mask,
                         .native_tiling = params.native_tiling,
-                        .level_extent = level_extent,
                     };
                     const VkDescriptorSet set = descriptor_allocator.Commit();
                     {
@@ -1164,13 +1159,9 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
             ASSERT(params.origin == (std::array<u32, 3>{0, 0, 0}));
             ASSERT(params.destination == (std::array<s32, 3>{0, 0, 0}));
             ASSERT(params.bytes_per_block_log2 == 4);
-            const std::array<u32, 2> level_extent{
-                (std::max)(info.size.width >> swizzle.level, 1U),
-                (std::max)(info.size.height >> swizzle.level, 1U)};
             VideoCommon::StreamStats::Add(StreamCounter::Dispatches);
             scheduler.Record([this, num_dispatches_x, num_dispatches_y, num_dispatches_z,
-                              block_dims, params, level_extent, descriptor_data](
-                                  vk::CommandBuffer cmdbuf) {
+                              block_dims, params, descriptor_data](vk::CommandBuffer cmdbuf) {
                 const VideoCommon::StreamStats::Scope worker_scope{StreamCounter::DecodeWorkerNs};
                 const AstcPushConstants uniforms{
                     .blocks_dims = block_dims,
@@ -1180,7 +1171,6 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
                     .block_height = params.block_height,
                     .block_height_mask = params.block_height_mask,
                     .native_tiling = params.native_tiling,
-                    .level_extent = level_extent,
                 };
                 const VkDescriptorSet set = descriptor_allocator.Commit();
                 {
