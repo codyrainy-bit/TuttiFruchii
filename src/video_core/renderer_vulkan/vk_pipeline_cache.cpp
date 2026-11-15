@@ -450,11 +450,14 @@ void CountPrecompiledReason(const char* reason) {
     ++precompiled_reasons[reason];
 }
 
+// NX2INFO7: NX2INFO6 plus the sampled TextureDescriptor's bind_null, which the serializer dropped
+// (see VisitTexture in info_serialize.cpp), so a pipeline prepared from the store could bind the
+// null texture where the translation asked for it and a guest word elsewhere.
 // NX2INFO6: this tree's Shader::Info after nx2 #1677, where removed_conditional_barrier became
 // demoted_conditional_barrier and nx2's uses_barrier_vote is carried too (NX2INFO5 plus those),
 // plus handle_shader_hash and the vertex write extent's vertex_stride/guard_vertex_stride. A file
 // of another version is prepared again.
-constexpr std::string_view PrecompiledInfosMagic{"NX2INFO6"};
+constexpr std::string_view PrecompiledInfosMagic{"NX2INFO7"};
 
 /// EDEN_NX2_PRECOMPILED_FAST=0: precompiled pipelines are translated on the GPU thread like the
 /// others (their kept infos and SPIR-V unused), to compare.

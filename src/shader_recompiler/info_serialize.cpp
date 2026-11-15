@@ -231,6 +231,7 @@ void VisitTexture(Io& io, D& d) {
     io(d.count);
     io(d.size_shift);
     io(d.handle_program);
+    io(d.bind_null);
     io(d.is_descriptor_array);
     io(d.handle_is_pointer_word);
 }
