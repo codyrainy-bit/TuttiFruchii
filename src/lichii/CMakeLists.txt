@@ -259,7 +259,13 @@ add_executable(lichii
     game/carousel.h game/carousel.cpp
 )
 
-set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
+# Windows ships as tuttifruchii.exe; the other platforms keep the lichii binary name their
+# packaging and CI scripts already reference.
+if (WIN32)
+    set_target_properties(lichii PROPERTIES OUTPUT_NAME "tuttifruchii")
+else()
+    set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
+endif()
 
 # Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
 # startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\lichii overrides it.

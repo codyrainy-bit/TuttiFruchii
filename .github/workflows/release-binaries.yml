@@ -494,12 +494,12 @@ jobs:
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
-          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+          foreach ($exe in 'tuttifruchii.exe', 'eden-cli.exe') {
             if (-not (Test-Path "build/release/bin/$exe")) {
               throw "build/release/bin/$exe was not produced"
             }
           }
-          windeployqt --release --no-translations build/release/bin/lichii.exe
+          windeployqt --release --no-translations build/release/bin/tuttifruchii.exe
 
       # A self-contained app bundle: macdeployqt copies Qt and every other Homebrew library both
       # programs load into the bundle, then the leftover Homebrew and build-tree search paths are
@@ -684,7 +684,7 @@ jobs:
 
           $(link zip lichii-windows-x86_64-pgo.zip)
 
-          Extract the zip and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
+          Extract the zip and run \`tuttifruchii.exe\`, or \`eden-cli.exe\` from a terminal.
 
           Both are x86-64-v3 builds, so they need an AVX2 CPU (Haswell or Excavator, 2013 or newer).
 

@@ -216,10 +216,12 @@ struct Values {
                                                              Category::Core,
                                                              Specialization::Default,
                                                              true};
-    /// Experimental, Windows: back the guest's memory with a sparse temporary file instead of a
-    /// section committed in full at boot (14 GiB for a Switch 2 title), so it takes no commit.
+    /// Windows: back the guest's memory with a sparse temporary file instead of a section committed
+    /// in full at boot (14 GiB for a Switch 2 title), so it takes no commit. Default on; the code
+    /// falls back to the committed section whenever the drive, the filesystem, or a handed-out
+    /// writable guest allocation says it cannot be used. EDEN_NX2_DYNAMIC_MEMORY=0 forces it off.
     /// Read when a game starts. See CreateSparseBackingFile for what it costs.
-    Setting<bool> nx2_dynamic_memory{linkage, false, "nx2_dynamic_memory", Category::Core};
+    Setting<bool> nx2_dynamic_memory{linkage, true, "nx2_dynamic_memory", Category::Core};
     SwitchableSetting<bool> use_speed_limit{
                                             linkage, true, "use_speed_limit", Category::Core, Specialization::Paired, true, true};
 
