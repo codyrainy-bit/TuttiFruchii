@@ -8,10 +8,11 @@
 #undef VMA_IMPLEMENTATION
 #endif
 
-#include <QSysInfo>
+#include <algorithm>
 #include <atomic>
 #include <future>
 #include <stop_token>
+#include <QSysInfo>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/settings.h"
@@ -41,17 +42,18 @@
 #include "install_dialog.h"
 
 #include "bootmanager.h"
-#include "loading_screen.h"
-#include "qt_common/util/vk.h"
-#include "ryujinx_dialog.h"
-#include "set_play_time_dialog.h"
-#include "util/util.h"
+#include "lichii/bug_report_dialog.h"
 #include "lichii/game/game_list.h"
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
 #include "lichii/whats_new_dialog.h"
-#include "lichii/bug_report_dialog.h"
+#include "loading_screen.h"
+#include "qt_common/util/vk.h"
+#include "ryujinx_dialog.h"
+#include "set_play_time_dialog.h"
+#include "util/cover_art.h"
+#include "util/util.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #ifdef LICHII_NX_TOOLS
 #include "core/file_sys/registered_cache.h"
@@ -485,9 +487,10 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if constexpr (Common::Nextendo::OnlinePlayAvailable) {
         connect(&nextendo_session_watcher, &QFutureWatcher<bool>::finished, this, [this] {
             if (nextendo_session_watcher.result()) {
-                QMessageBox::warning(this, tr("Signed out of Nextendo"),
-                                     tr("Your session was ended on nextendo.network, so Lichii "
-                                        "signed you out. Sign in again in Configure > Network."));
+                QMessageBox::warning(
+                    this, tr("Signed out of Nextendo"),
+                    tr("Your session was ended on nextendo.network, so TuttiFruchii "
+                       "signed you out. Sign in again in Configure > Network."));
             }
         });
         connect(&nextendo_session_timer, &QTimer::timeout, this,
@@ -532,6 +535,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     update_input_timer.setInterval(default_input_update_timeout);
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
+
+    // Controllers can be plugged in at any time; looking every two seconds is cheap.
+    gamepad_timer.setInterval(2000);
+    connect(&gamepad_timer, &QTimer::timeout, this, &MainWindow::CheckForGamepad);
+    gamepad_timer.start();
+    QTimer::singleShot(500, this, &MainWindow::CheckForGamepad);
     update_input_timer.start();
 
     if (has_broken_vulkan) {
@@ -2065,7 +2074,8 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
         case Core::SystemResultStatus::ErrorMemoryAllocation:
             QMessageBox::critical(
                 this, tr("Not enough memory to start the game"),
-                tr("Lichii could not allocate the game's memory. Close other applications and "
+                tr("TuttiFruchii could not allocate the game's memory. Close other applications "
+                   "and "
                    "check that your system has enough available memory and paging-file space, "
                    "then try again."));
             break;
@@ -2214,7 +2224,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (close_pending) {
         return;
     }
-    LOG_INFO(Frontend, "Lichii starting...");
+    LOG_INFO(Frontend, "TuttiFruchii starting...");
     report_session.reset();
     game_list->SetReportableProgramId(0);
 
@@ -2467,6 +2477,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
 
     std::string title_name;
     std::string title_version;
+    std::string title_developer;
     const auto res = QtCommon::system->GetGameName(title_name);
 
     const auto metadata = [title_id] {
@@ -2477,6 +2488,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (metadata.first != nullptr) {
         title_version = metadata.first->GetVersionString();
         title_name = metadata.first->GetApplicationName();
+        title_developer = metadata.first->GetDeveloperName();
     }
     if (res != Loader::ResultStatus::Success || title_name.empty()) {
         title_name = Common::FS::PathToUTF8String(
@@ -2486,6 +2498,32 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // The name the user gave the game in Properties wins, as in the library.
     if (auto custom_title = QtCommon::Game::ReadCustomTitle(title_id); !custom_title.empty()) {
         title_name = std::move(custom_title);
+    }
+    loading_screen->SetGameDetails(title_id, QString::fromStdString(title_name),
+                                   QString::fromStdString(title_developer),
+                                   QString::fromStdString(title_version));
+    // A game without a downloaded banner gets one now, by the name it boots with, and the
+    // loading screen shows it as soon as it arrives. A "no art" marker from a library scan that
+    // could not read the name does not stop this.
+    {
+        std::error_code ec;
+        if (UISettings::values.download_cover_art.GetValue() && title_id != 0 &&
+            !std::filesystem::exists(QtCommon::Game::DownloadedBannerPath(title_id), ec)) {
+            auto* const watcher = new QFutureWatcher<CoverArt::Result>(this);
+            connect(watcher, &QFutureWatcher<CoverArt::Result>::finished, this,
+                    [this, watcher, title_id] {
+                        watcher->deleteLater();
+                        const CoverArt::Result result = watcher->result();
+                        if (result.cover_saved || result.banner_saved) {
+                            LOG_INFO(Frontend, "Cover art saved for {:016X} at boot", title_id);
+                            loading_screen->ReloadArt(title_id);
+                        }
+                    });
+            watcher->setFuture(QtConcurrent::run([title_id, title = title_name] {
+                static const std::atomic_bool never_cancelled{false};
+                return CoverArt::Download(title_id, title, never_cancelled);
+            }));
+        }
     }
     const bool is_64bit = QtCommon::system->Kernel().ApplicationProcess()->Is64Bit();
     const auto instruction_set_suffix = is_64bit ? tr("(64-bit)") : tr("(32-bit)");
@@ -3375,7 +3413,8 @@ bool MainWindow::BuildPrecompiledFromPlay(u64 program_id, const std::string& gam
     if (recorded == 0) {
         QMessageBox::information(
             this, title,
-            tr("Lichii has not recorded any shaders of this game yet. Play it for a while first: "
+            tr("TuttiFruchii has not recorded any shaders of this game yet. Play it for a while "
+               "first: "
                "the shaders it draws are what the precompiled shaders are predicted from."));
         return false;
     }
@@ -3564,7 +3603,7 @@ void MainWindow::OfferPrecompiledBuild(u64 title_id, const std::string& game_pat
                        .arg(recorded)
                        .arg(recorded - state.recorded)
                  : tr("Your play has recorded %1 of this game's shaders. That is enough for "
-                      "Lichii to predict the shaders of the places you have not been yet, so "
+                      "TuttiFruchii to predict the shaders of the places you have not been yet, so "
                       "they don't stutter the first time either. Build precompiled shaders "
                       "now?")
                        .arg(recorded)) +
@@ -5625,10 +5664,10 @@ void MainWindow::KeepNextendoSessionAlive() {
 void MainWindow::OnEmulatorUpdateAvailable() {
     const auto result = update_future.result();
     if (result.failure == UpdateChecker::Failure::RateLimited) {
-        statusBar()->showMessage(
-            tr("Could not check for updates: GitHub rate limit reached. Lichii will try again at "
-               "the next start."),
-            15000);
+        statusBar()->showMessage(tr("Could not check for updates: GitHub rate limit reached. "
+                                    "TuttiFruchii will try again at "
+                                    "the next start."),
+                                 15000);
         return;
     }
     if (result.failure == UpdateChecker::Failure::Http) {
@@ -6120,6 +6159,85 @@ void MainWindow::UpdateInputDrivers() {
     input_subsystem->PumpEvents();
 }
 
+void MainWindow::CheckForGamepad() {
+    if (!QtCommon::system || !input_subsystem) {
+        return;
+    }
+    auto& hid_core = QtCommon::system->HIDCore();
+    auto* const player1 = hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1);
+    auto* const handheld = hid_core.GetEmulatedController(Core::HID::NpadIdType::Handheld);
+    // Leave the controllers alone while the input settings are open.
+    if (player1 == nullptr || handheld == nullptr || player1->IsConfiguring() ||
+        handheld->IsConfiguring()) {
+        return;
+    }
+    const auto key = [](const Common::ParamPackage& params) {
+        return fmt::format("{}:{}", params.Get("guid", ""), params.Get("port", 0));
+    };
+    const auto engine = [](const Core::HID::EmulatedController* controller) {
+        return controller->GetButtonParam(Settings::NativeButton::A).Get("engine", "");
+    };
+    const auto devices = input_subsystem->GetInputDevices();
+
+    if (!auto_gamepad.empty()) {
+        const bool still_ours =
+            engine(player1) == "sdl" &&
+            key(player1->GetButtonParam(Settings::NativeButton::A)) == auto_gamepad;
+        const bool connected =
+            std::ranges::any_of(devices, [&](const Common::ParamPackage& device) {
+                return key(device) == auto_gamepad;
+            });
+        if (still_ours && connected) {
+            return;
+        }
+        if (still_ours) {
+            // Unplugged: back to the mapping in the settings, the keyboard.
+            player1->ReloadFromSettings();
+            handheld->ReloadFromSettings();
+            statusBar()->showMessage(tr("Controller disconnected. Player 1 uses the keyboard."),
+                                     5000);
+            LOG_INFO(Frontend, "Gamepad unplugged; player 1 is back on the keyboard");
+        }
+        // Mapped to something else since: that choice stays.
+        auto_gamepad.clear();
+    }
+
+    if (!UISettings::values.auto_use_gamepad.GetValue() || engine(player1) != "keyboard") {
+        return;
+    }
+    for (const auto& device : devices) {
+        // Xbox, PlayStation and other gamepads all come through SDL.
+        if (device.Get("engine", "") != "sdl") {
+            continue;
+        }
+        const auto buttons = input_subsystem->GetButtonMappingForDevice(device);
+        if (buttons.empty()) {
+            continue;
+        }
+        const auto sticks = input_subsystem->GetAnalogMappingForDevice(device);
+        const auto motions = input_subsystem->GetMotionMappingForDevice(device);
+        for (auto* const controller : {player1, handheld}) {
+            if (engine(controller) != "keyboard") {
+                continue;
+            }
+            for (const auto& [index, param] : buttons) {
+                controller->SetButtonParam(index, param);
+            }
+            for (const auto& [index, param] : sticks) {
+                controller->SetStickParam(index, param);
+            }
+            for (const auto& [index, param] : motions) {
+                controller->SetMotionParam(index, param);
+            }
+        }
+        auto_gamepad = key(device);
+        const QString name = QString::fromStdString(device.Get("display", "Controller"));
+        statusBar()->showMessage(tr("%1 connected. Player 1 uses it.").arg(name), 5000);
+        LOG_INFO(Frontend, "Player 1 uses the gamepad {} automatically", device.Get("display", ""));
+        return;
+    }
+}
+
 void MainWindow::HideMouseCursor() {
     if (QtCommon::emu_thread == nullptr && UISettings::values.hide_mouse) {
         mouse_hide_timer.stop();
@@ -6208,7 +6326,7 @@ void MainWindow::OnCheckGraphicsBackend() {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
         QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Lichii to apply the X11 backend."));
+                                 tr("Restart TuttiFruchii to apply the X11 backend."));
     }
 }
 #endif
@@ -6327,8 +6445,8 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Lichii?");
-    return question(this, tr("Lichii"), text);
+    const auto text = tr("Are you sure you want to close TuttiFruchii?");
+    return question(this, tr("TuttiFruchii"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -6434,7 +6552,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Lichii"),
+        this, tr("TuttiFruchii"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -6443,10 +6561,11 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Lichii to not exit.\n\n"
-                         "Would you like to bypass this and exit anyway?");
+    const auto text =
+        tr("The currently running application has requested TuttiFruchii to not exit.\n\n"
+           "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Lichii"), text);
+    return question(this, tr("TuttiFruchii"), text);
 }
 
 void MainWindow::RequestGameExit() {
@@ -6466,7 +6585,7 @@ static void AdjustLinkColor() {
     QPalette new_pal(qApp->palette());
 
     if (UISettings::values.theme == "lichii")
-        new_pal.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
+        new_pal.setColor(QPalette::Link, QColor(0x66, 0x87, 0xea));
     else if (UISettings::IsDarkTheme())
         new_pal.setColor(QPalette::Link, QColor(0, 190, 255, 255));
     else
@@ -6484,7 +6603,7 @@ static QPalette LichiiPalette() {
     const QColor surface(0x20, 0x21, 0x25);
     const QColor text(0xec, 0xec, 0xef);
     const QColor disabled(0x55, 0x57, 0x5d);
-    const QColor accent(0xf0, 0x38, 0x6b);
+    const QColor accent(0x41, 0x69, 0xe1);
     palette.setColor(QPalette::Window, window);
     palette.setColor(QPalette::WindowText, text);
     palette.setColor(QPalette::Base, window);
@@ -6503,8 +6622,8 @@ static QPalette LichiiPalette() {
     palette.setColor(QPalette::Shadow, Qt::black);
     palette.setColor(QPalette::Highlight, accent);
     palette.setColor(QPalette::HighlightedText, Qt::white);
-    palette.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
-    palette.setColor(QPalette::LinkVisited, QColor(0xd4, 0x2c, 0x5a));
+    palette.setColor(QPalette::Link, QColor(0x66, 0x87, 0xea));
+    palette.setColor(QPalette::LinkVisited, QColor(0x34, 0x58, 0xc8));
     palette.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
     palette.setColor(QPalette::Disabled, QPalette::Text, disabled);
     palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
