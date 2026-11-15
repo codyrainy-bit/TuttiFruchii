@@ -32,7 +32,7 @@ AboutDialog::AboutDialog(QWidget* parent)
     if (!lichii_logo.isNull()) {
         ui->labelLogo->setPixmap(lichii_logo.pixmap(112));
     }
-    ui->labelLichii->setPixmap(QIcon(QStringLiteral(":/img/lichii_wordmark.png")).pixmap(113, 48));
+    ui->labelLichii->setPixmap(QIcon(QStringLiteral(":/img/lichii.ico")).pixmap(48, 48));
     ui->labelLichii->setAccessibleName(QStringLiteral("tuttifruchii"));
     ui->verticalLayout_3->setContentsMargins(32, 28, 32, 20);
     ui->horizontalLayout->setSpacing(32);
