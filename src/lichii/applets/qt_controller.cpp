@@ -218,7 +218,10 @@ QtControllerSelectorDialog::QtControllerSelectorDialog(
     connect(ui->buttonBox, &QDialogButtonBox::accepted, this,
             &QtControllerSelectorDialog::ApplyConfiguration);
 
-    connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent,
+    // The d-pad's and the stick's directions both move the selection.
+    for (const auto signal : {&ControllerNavigation::TriggerKeyboardEvent,
+                              &ControllerNavigation::TriggerStickDirection})
+        connect(controller_navigation, signal,
             [this](Qt::Key key) {
                 QKeyEvent* event = new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier);
                 QCoreApplication::postEvent(this, event);

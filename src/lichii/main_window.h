@@ -548,7 +548,9 @@ private:
 #ifdef ENABLE_UPDATE_CHECKER
     QFuture<UpdateChecker::CheckResult> update_future;
     QFutureWatcher<UpdateChecker::CheckResult> update_watcher;
+    bool update_waiting = false;
 #endif
+    bool whats_new_open = false;
 
     MultiplayerState* multiplayer_state = nullptr;
     void RememberSpeedLimitBeforeHotkey();

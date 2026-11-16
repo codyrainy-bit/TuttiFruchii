@@ -31,6 +31,7 @@
 #endif
 #include "video_core/renderer_vulkan/async_teardown.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+#include "video_core/upscaler_status.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -314,6 +315,7 @@ RendererVulkan::RendererVulkan(Core::Frontend::EmuWindow& emu_window,
 }
 
 RendererVulkan::~RendererVulkan() {
+    VideoCommon::ReportTemporalUpscaler(VideoCommon::TemporalUpscaler::None);
     teardown_clock.Start();
     driver_owner->retiring = true;
     scheduler.RegisterOnSubmit([] {});
@@ -626,5 +628,10 @@ VideoCore::DlssStatus RendererVulkan::GetDlssStatus() const {
     return StreamlineDlssUpscaler::Status();
 }
 #endif
+
+std::optional<VideoCore::RendererBase::VramUsage> RendererVulkan::GetVramUsage() const {
+    // The driver's and VMA's view of this process's device-local memory, against the card's.
+    return VramUsage{device.GetDeviceMemoryUsage(), device.GetDeviceLocalHeapSize()};
+}
 
 } // namespace Vulkan

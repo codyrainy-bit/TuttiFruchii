@@ -298,7 +298,7 @@
   </action>
   <action name="action_Whats_New">
    <property name="text">
-    <string>&amp;What's New in TuttiFruchii</string>
+    <string>&amp;What's New</string>
    </property>
   </action>
   <action name="action_About">

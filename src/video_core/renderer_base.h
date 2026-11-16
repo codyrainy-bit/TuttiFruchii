@@ -98,6 +98,16 @@ public:
     }
 
     /// How many NVIDIA DLSS evaluations ran so far and the mode of the last one
+    /// Video memory in bytes: what the emulator uses and what the card has. None without a value
+    /// (a renderer that cannot tell).
+    struct VramUsage {
+        u64 used{};
+        u64 total{};
+    };
+    [[nodiscard]] virtual std::optional<VramUsage> GetVramUsage() const {
+        return std::nullopt;
+    }
+
     [[nodiscard]] virtual DlssStatus GetDlssStatus() const {
         return {};
     }

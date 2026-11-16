@@ -20,6 +20,7 @@
 #include <QList>
 #include <QListView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollBar>
 #include <QScroller>
 #include <QTimer>
@@ -53,6 +54,7 @@
 #include "lichii/game/search_field.h"
 #include "lichii/main_window.h"
 #include "lichii/shader_warm_dialog.h"
+#include "lichii/util/controller_dialog_navigator.h"
 #include "lichii/util/controller_navigation.h"
 #include "lichii/util/cover_art.h"
 #include "lichii/util/icon_search.h"
@@ -98,12 +100,29 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     connect(home_view, &QListView::activated, this, &GameList::ValidateEntry);
     connect(home_view, &QListView::customContextMenuRequested, this, &GameList::PopupContextMenu);
+    connect(home_view, &GameHome::AddGamesRequested, this, &GameList::AddDirectory);
+    connect(home_view, &GameHome::ReorderFinished, this, [this](bool keep) {
+        if (keep) {
+            SaveGameOrder();
+        }
+    });
 
     controller_repeat = new QTimer(this);
     connect(controller_repeat, &QTimer::timeout, this, [this] {
         controller_repeat->setInterval(110);
-        PostControllerKey(controller_repeat_key, true);
+        PostControllerKey(controller_repeat_key, true, controller_repeat_from_stick);
     });
+    dialog_navigator = new ControllerDialogNavigator(this);
+    connect(controller_navigation, &ControllerNavigation::TriggerStickDirection, this,
+            [this](Qt::Key key) { PostControllerKey(key, false, true); });
+    connect(controller_navigation, &ControllerNavigation::SticksMoved, this,
+            [this](float lx, float ly, float rx, float ry) {
+                if (system.IsPoweredOn()) {
+                    dialog_navigator->Suspend();
+                    return;
+                }
+                dialog_navigator->SetSticks(lx, ly, rx, ry);
+            });
     connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent, this,
             [this](Qt::Key key) { PostControllerKey(key, false); });
     connect(controller_navigation, &ControllerNavigation::TriggerKeyboardRelease, this,
@@ -129,14 +148,50 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
     ResetViewMode();
 }
 
-void GameList::PostControllerKey(Qt::Key key, bool repeat) {
+void GameList::PostControllerKey(Qt::Key key, bool repeat, bool from_stick) {
     if (system.IsPoweredOn()) {
         controller_repeat->stop();
         return;
     }
-    // An open menu (a game's options, a menu from the home view) takes the keys first, so it can
-    // be used with the controller too.
+    const auto start_repeat = [&] {
+        if (repeat) {
+            return;
+        }
+        const bool direction = key == Qt::Key_Left || key == Qt::Key_Right ||
+                               key == Qt::Key_Up || key == Qt::Key_Down;
+        if (direction) {
+            controller_repeat_key = key;
+            controller_repeat_from_stick = from_stick;
+            controller_repeat->start(380);
+        } else {
+            controller_repeat->stop();
+        }
+    };
+    // An open menu (a game's options, a menu from the home view, a drop-down in the settings)
+    // takes the keys first, so it can be used with the controller too, stick included.
     QWidget* target = QApplication::activePopupWidget();
+    if (target != nullptr) {
+        if (QWidget* focus = target->focusWidget()) {
+            target = focus;
+        }
+        QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier));
+        start_repeat();
+        return;
+    }
+    if (QWidget* modal = QApplication::activeModalWidget()) {
+        if (modal->property("controllerNavigation").toBool()) {
+            // A window made for the controller (the update prompt), at its focused button.
+            QWidget* focus = modal->focusWidget() != nullptr ? modal->focusWidget() : modal;
+            QCoreApplication::postEvent(focus,
+                                        new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier));
+            start_repeat();
+        } else if (!from_stick) {
+            // Settings and other windows: the d-pad and buttons; the stick moves a cursor there.
+            dialog_navigator->HandleKey(modal, key);
+            start_repeat();
+        }
+        return;
+    }
     if (target == nullptr) {
         if (!this->isActiveWindow() || !this->isVisible()) {
             controller_repeat->stop();
@@ -145,17 +200,7 @@ void GameList::PostControllerKey(Qt::Key key, bool repeat) {
         target = m_currentView;
     }
     QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier));
-
-    if (!repeat) {
-        const bool direction = key == Qt::Key_Left || key == Qt::Key_Right ||
-                               key == Qt::Key_Up || key == Qt::Key_Down;
-        if (direction) {
-            controller_repeat_key = key;
-            controller_repeat->start(380);
-        } else {
-            controller_repeat->stop();
-        }
-    }
+    start_repeat();
 }
 
 void GameList::SetHomeMenuBar(QMenuBar* menu_bar) {
@@ -444,6 +489,8 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
         ShowCustomArtwork(program_id);
     }
     artwork_saved.clear();
+
+    ApplyGameOrder();
 
     emit PopulatingCompleted();
     QueueArtworkLookups();
@@ -903,7 +950,91 @@ void GameList::SetReportableProgramId(u64 program_id) {
     reportable_program_id = program_id;
 }
 
+void GameList::ApplyGameOrder() {
+    if (m_isTreeMode) {
+        return;
+    }
+    std::vector<u64> order;
+    for (const QString& id :
+         QString::fromStdString(UISettings::values.game_order.GetValue())
+             .split(QLatin1Char{','}, Qt::SkipEmptyParts)) {
+        bool ok = false;
+        const u64 program_id = id.toULongLong(&ok, 16);
+        if (ok && program_id != 0) {
+            order.push_back(program_id);
+        }
+    }
+    // Games in the saved order go first, in it; the others keep their place after them.
+    int target = 0;
+    for (const u64 program_id : order) {
+        for (int row = target; row < item_model->rowCount(); ++row) {
+            QStandardItem* item = item_model->item(row, 0);
+            if (item == nullptr ||
+                item->data(GameListItem::TypeRole).toInt() !=
+                    static_cast<int>(GameListItemType::Game) ||
+                item->data(GameListItemPath::ProgramIdRole).toULongLong() != program_id) {
+                continue;
+            }
+            if (row != target) {
+                const QList<QStandardItem*> items = item_model->takeRow(row);
+                item_model->insertRow(target, items);
+            }
+            ++target;
+            break;
+        }
+    }
+}
+
+void GameList::SaveGameOrder() {
+    QStringList ids;
+    for (int row = 0; row < item_model->rowCount(); ++row) {
+        const QStandardItem* item = item_model->item(row, 0);
+        if (item != nullptr && item->data(GameListItem::TypeRole).toInt() ==
+                                   static_cast<int>(GameListItemType::Game)) {
+            ids << QStringLiteral("%1").arg(
+                item->data(GameListItemPath::ProgramIdRole).toULongLong(), 16, 16,
+                QLatin1Char{'0'});
+        }
+    }
+    ids.removeDuplicates();
+    UISettings::values.game_order = ids.join(QLatin1Char{','}).toStdString();
+    emit SaveConfig();
+}
+
+UISettings::GameDir* GameList::GameDirectoryOf(const std::string& path) {
+    const std::filesystem::path game = std::filesystem::path(path).lexically_normal();
+    UISettings::GameDir* best = nullptr;
+    std::size_t best_length = 0;
+    for (UISettings::GameDir& dir : UISettings::values.game_dirs) {
+        // The installed-content entries are not folders the user added.
+        if (dir.path == "SDMC" || dir.path == "UserNAND" || dir.path == "SysNAND" ||
+            dir.path.empty()) {
+            continue;
+        }
+        const std::filesystem::path folder = std::filesystem::path(dir.path).lexically_normal();
+        const auto [end, _] = std::mismatch(folder.begin(), folder.end(), game.begin(), game.end());
+        if (end != folder.end()) {
+            continue;
+        }
+        const std::size_t length = dir.path.size();
+        if (length > best_length) {
+            best_length = length;
+            best = &dir;
+        }
+    }
+    return best;
+}
+
 void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path) {
+    // At the top in the home view: Reorder Game Position.
+    if (game_list_mode == Settings::GameListMode::HomeView) {
+        QAction* reorder = context_menu.addAction(tr("Reorder Game Position"));
+        reorder->setIcon(MenuIcon("list"));
+        connect(reorder, &QAction::triggered, this, [this, program_id] {
+            home_view->SelectProgram(program_id);
+            home_view->BeginReorder();
+        });
+    }
     // TODO(crueter): Refactor this and make it less bad
     QAction* favorite = context_menu.addAction(tr("Favorite"));
     context_menu.addSeparator();
@@ -926,6 +1057,34 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         context_menu.addAction(tr("Build Precompiled Shaders from My Play..."));
     QAction* ryujinx = context_menu.addAction(tr("Link to Ryujinx"));
     context_menu.addSeparator();
+    // Takes the folder the game was found in out of the library; nothing is deleted.
+    QAction* remove_directory = context_menu.addAction(tr("Remove Game Directory"));
+    remove_directory->setIcon(MenuIcon("x"));
+    if (const UISettings::GameDir* directory = GameDirectoryOf(path)) {
+        remove_directory->setToolTip(QString::fromStdString(directory->path));
+    } else {
+        // Installed titles (NAND, SD card) are not in a folder the user added.
+        remove_directory->setEnabled(false);
+    }
+    connect(remove_directory, &QAction::triggered, this, [this, path] {
+        const UISettings::GameDir* directory = GameDirectoryOf(path);
+        if (directory == nullptr) {
+            return;
+        }
+        const UISettings::GameDir removed = *directory;
+        const auto answer = QMessageBox::question(
+            this, tr("Remove Game Directory"),
+            tr("Remove %1 from the library?\n\nThe games in it stay on your drive; TuttiFruchii "
+               "only stops listing them. You can add the folder again with the + tile.")
+                .arg(QString::fromStdString(removed.path)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+        UISettings::values.game_dirs.removeOne(removed);
+        emit SaveConfig();
+        PopulateAsync(UISettings::values.game_dirs);
+    });
     QMenu* remove_menu = context_menu.addMenu(tr("Remove"));
     QAction* remove_update = remove_menu->addAction(tr("Remove Installed Update"));
     QAction* remove_dlc = remove_menu->addAction(tr("Remove All Installed DLC"));

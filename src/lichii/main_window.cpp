@@ -47,7 +47,6 @@
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
-#include "lichii/whats_new_dialog.h"
 #include "loading_screen.h"
 #include "qt_common/util/vk.h"
 #include "ryujinx_dialog.h"
@@ -442,13 +441,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     default_theme_paths = QIcon::themeSearchPaths();
 
-    // The first launch after an interface update switches to Lichii Dark and explains what moved.
-    const bool whats_new_pending =
-        UISettings::values.whats_new_version.GetValue() < WhatsNewDialog::Version;
-    if (whats_new_pending) {
-        UISettings::values.whats_new_version = WhatsNewDialog::Version;
+    // The first launch of a new version shows its changelog once. Profiles from before the
+    // Lichii redesign also switch to Lichii Dark.
+    const u32 seen_version = UISettings::values.whats_new_version.GetValue();
+    const bool whats_new_pending = seen_version < UpdateDialog::ChangelogVersion;
+    if (seen_version < 1) {
         UISettings::values.theme =
             UISettings::themes[static_cast<size_t>(UISettings::Theme::LichiiDark)].second;
+    }
+    if (whats_new_pending) {
+        UISettings::values.whats_new_version = UpdateDialog::ChangelogVersion;
     }
     UpdateUITheme();
 
@@ -474,6 +476,22 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     UpdateWindowTitle();
 
     show();
+
+#if defined(ENABLE_UPDATE_CHECKER) && defined(_WIN32)
+    // The installer helper was lichii-updater.exe before TuttiFruchii-updater.exe.
+    UpdateDialog::RemoveOldHelper();
+#endif
+
+    // TUTTIFRUCHII_TEST_UPDATE=1 shows the update prompt with a made-up release; "Update" in it
+    // only pretends to download.
+    if (qEnvironmentVariableIntValue("TUTTIFRUCHII_TEST_UPDATE") == 1) {
+        QTimer::singleShot(1200, this, [this] {
+            UpdateHomeButtonStyle();
+            UpdateDialog dialog(UpdateDialog::TestRelease(), this,
+                                game_list->Home()->CurrentButtonStyle(), true);
+            dialog.exec();
+        });
+    }
 
 #ifdef ENABLE_UPDATE_CHECKER
     if (UISettings::values.check_for_updates) {
@@ -517,9 +535,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
     game_list->PopulateAsync(UISettings::values.game_dirs);
 
-    if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
-        UISettings::values.show_whats_new.GetValue()) {
-        QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
+    if (whats_new_pending) {
+        // Once the window is laid out and the controllers are known, for the button hints.
+        QTimer::singleShot(800, this, &MainWindow::OnWhatsNew);
     }
 
     // Set up game list mode checkboxes.
@@ -3683,7 +3701,21 @@ void MainWindow::OnGameListOpenDirectory(const QString& directory) {
 }
 
 void MainWindow::OnGameListAddDirectory() {
-    const QString dir_path = QFileDialog::getExistingDirectory(this, tr("Select Directory"));
+    QString dir_path;
+    if (UISettings::values.game_list_mode.GetValue() == Settings::GameListMode::HomeView) {
+        // Qt's own folder picker, not the desktop's: it runs in this window, so the controller
+        // can drive it (A opens a folder, B goes up one, + chooses the folder that is open).
+        QFileDialog dialog(this, tr("Select Directory"));
+        dialog.setFileMode(QFileDialog::Directory);
+        dialog.setOption(QFileDialog::ShowDirsOnly);
+        dialog.setOption(QFileDialog::DontUseNativeDialog);
+        dialog.setDirectory(QDir::homePath());
+        if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
+            dir_path = dialog.selectedFiles().front();
+        }
+    } else {
+        dir_path = QFileDialog::getExistingDirectory(this, tr("Select Directory"));
+    }
     if (dir_path.isEmpty()) {
         return;
     }
@@ -4487,6 +4519,13 @@ void MainWindow::SetupHomeView() {
         return QStringLiteral("%1%").arg(Settings::values.volume.GetValue());
     };
     volume.active = [] { return !Settings::values.audio_muted; };
+    // Full at 100%; the volume can go up to 200%.
+    volume.level = [] {
+        if (Settings::values.audio_muted) {
+            return 0.0;
+        }
+        return std::min(1.0, Settings::values.volume.GetValue() / 100.0);
+    };
     volume.adjust = [this](int step) {
         Settings::values.audio_muted = false;
         const int value = std::clamp(static_cast<int>(Settings::values.volume.GetValue()) +
@@ -4989,7 +5028,10 @@ bool MainWindow::question(QWidget* parent, const QString& title, const QString& 
 
     ControllerNavigation* controller_navigation =
         new ControllerNavigation(QtCommon::system->HIDCore(), box_dialog);
-    connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent,
+    // The d-pad's and the stick's directions both move the selection.
+    for (const auto signal : {&ControllerNavigation::TriggerKeyboardEvent,
+                              &ControllerNavigation::TriggerStickDirection})
+        connect(controller_navigation, signal,
             [box_dialog](Qt::Key key) {
                 QKeyEvent* event = new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier);
                 QCoreApplication::postEvent(box_dialog, event);
@@ -5075,11 +5117,20 @@ void MainWindow::OnInstallDecryptionKeys() {
 }
 
 void MainWindow::OnWhatsNew() {
-    WhatsNewDialog dialog(this);
-    dialog.exec();
-    if (dialog.OpenConfigureRequested()) {
-        OnConfigure();
+    if (whats_new_open) {
+        return;
     }
+    whats_new_open = true;
+    UpdateHomeButtonStyle();
+    UpdateDialog::ShowChangelog(this, game_list->Home()->CurrentButtonStyle());
+    whats_new_open = false;
+#ifdef ENABLE_UPDATE_CHECKER
+    // An update found while the changelog was open is offered after it.
+    if (update_waiting) {
+        update_waiting = false;
+        OnEmulatorUpdateAvailable();
+    }
+#endif
 }
 
 void MainWindow::OnAbout() {
@@ -5817,6 +5868,10 @@ void MainWindow::KeepNextendoSessionAlive() {
 
 #ifdef ENABLE_UPDATE_CHECKER
 void MainWindow::OnEmulatorUpdateAvailable() {
+    if (whats_new_open) {
+        update_waiting = true;
+        return;
+    }
     const auto result = update_future.result();
     if (result.failure == UpdateChecker::Failure::RateLimited) {
         statusBar()->showMessage(tr("Could not check for updates: GitHub rate limit reached. "
@@ -5842,7 +5897,8 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         return;
     }
 
-    UpdateDialog dialog(release, this);
+    UpdateHomeButtonStyle();
+    UpdateDialog dialog(release, this, game_list->Home()->CurrentButtonStyle());
     switch (dialog.exec()) {
     case UpdateDialog::SkipVersion:
         UISettings::values.skipped_update_tag = release.tag;

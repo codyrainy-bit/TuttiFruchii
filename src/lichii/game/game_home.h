@@ -4,15 +4,18 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include <QColor>
+#include "common/common_types.h"
 #include <QListView>
 #include <QPointer>
 #include <QString>
 
 class GameListModel;
 class HomeCard;
+class HomeSound;
 class QLabel;
 class QMenu;
 class QMenuBar;
@@ -34,6 +37,9 @@ struct HomeChip {
     std::function<void()> activate;
     /// Left/right while the chip is being adjusted (volume). A enters and leaves adjusting.
     std::function<void(int)> adjust;
+    /// 0..1: the chip fills to this level from the left (volume), and fills or drains smoothly
+    /// as it changes. Unset for a chip without a level.
+    std::function<double()> level;
 };
 
 /**
@@ -67,6 +73,11 @@ public:
     void HideWhileShown(QWidget* bar);
     void SetChips(std::vector<HomeChip> chips);
     void SetButtonStyle(ButtonStyle style);
+    [[nodiscard]] ButtonStyle CurrentButtonStyle() const {
+        return button_style;
+    }
+    /// A button glyph as the home view's hints draw it, for other controller-driven screens.
+    static QWidget* CreateGlyph(ButtonStyle style, HintRole role, QWidget* parent);
     void RefreshChips();
 
     /// Moves the selection by delta games (the mouse wheel uses it).
@@ -77,8 +88,26 @@ public:
     /// Which row has the controller focus; the card delegate draws the selection ring only on
     /// the cards row.
     [[nodiscard]] bool CardsFocused() const;
-    /// 0..1, the selection ring's pulse.
+    /// 0..1, how far the selection ring's rainbow has turned.
     [[nodiscard]] qreal Pulse() const;
+    /// The "+" tile after the last game is selected instead of a game.
+    [[nodiscard]] bool PlusSelected() const {
+        return plus_selected;
+    }
+
+    /// Reorder Game Position: the selected game lifts and moves with left/right until A puts it
+    /// down (ReorderFinished(true)) or B puts everything back (ReorderFinished(false)).
+    void BeginReorder();
+    [[nodiscard]] bool Reordering() const {
+        return reordering;
+    }
+    /// Selects the game with this program ID.
+    void SelectProgram(u64 program_id);
+
+signals:
+    /// The "+" tile was chosen: add a game directory.
+    void AddGamesRequested();
+    void ReorderFinished(bool keep);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -87,7 +116,10 @@ protected:
     void hideEvent(QHideEvent* event) override;
     void currentChanged(const QModelIndex& current, const QModelIndex& previous) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void updateGeometries() override;
     bool eventFilter(QObject* object, QEvent* event) override;
+    bool event(QEvent* event) override;
 
 private:
     enum class Row { Menus, Cards, Chips };
@@ -105,6 +137,13 @@ private:
     void ActivateChip(int index);
     void RebuildPills();
     void StyleChip(size_t index);
+    void SelectPlus(bool selected);
+    void MoveCurrentGame(int delta);
+    void FinishReorder(bool keep);
+    void ScrollToRect(const QRect& rect);
+    [[nodiscard]] std::vector<int> VisibleRows() const;
+    /// Where the "+" tile is, in viewport coordinates.
+    [[nodiscard]] QRect PlusRect() const;
 
     struct HiddenBar {
         QPointer<QWidget> bar;
@@ -136,6 +175,11 @@ private:
     int focused_pill = 0;
     int focused_chip = 0;
     bool adjusting = false;
+    bool plus_selected = false;
+    bool reordering = false;
+    /// The games' order when reordering started, for B to put back.
+    std::vector<u64> reorder_original;
+    std::unique_ptr<HomeSound> sound;
 
     int card_side = 280;
     int ring_pad = 12;
@@ -144,4 +188,7 @@ private:
     QVariantAnimation* scroll_animation = nullptr;
     QVariantAnimation* pulse_animation = nullptr;
     QTimer* refresh_timer = nullptr;
+    /// The level each chip shows, easing toward chips[i].level().
+    std::vector<double> chip_levels;
+    QTimer* level_timer = nullptr;
 };

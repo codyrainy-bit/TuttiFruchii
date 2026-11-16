@@ -26,6 +26,8 @@
 #include "video_core/rasterizer_interface.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "lichii/loading_screen.h"
+#include "lichii/util/controller_navigation.h"
+#include "qt_common/qt_common.h"
 
 namespace {
 
@@ -112,14 +114,14 @@ LoadingScreen::LoadingScreen(QWidget* parent)
     skip_button->setCursor(Qt::PointingHandCursor);
     skip_button->hide();
     ui->top_row->addWidget(skip_button, 0, Qt::AlignRight | Qt::AlignTop);
-    connect(skip_button, &QPushButton::clicked, this, [this] {
-        if (previous_stage == VideoCore::LoadCallbackStage::Precompiled) {
-            ConfirmSkipPreparation();
-            return;
-        }
-        VideoCommon::ShaderWarm::RequestSkipWarm();
-        skip_button->setEnabled(false);
-    });
+    connect(skip_button, &QPushButton::clicked, this, &LoadingScreen::ConfirmSkip);
+
+    // The controller can skip too: A asks, A again confirms, B goes back.
+    if (QtCommon::system) {
+        controller_navigation = new ControllerNavigation(QtCommon::system->HIDCore(), this);
+        connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent, this,
+                &LoadingScreen::OnControllerKey);
+    }
     qRegisterMetaType<VideoCore::LoadCallbackStage>();
 
     ApplyScale();
@@ -285,8 +287,50 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     previous_time = now;
 }
 
-void LoadingScreen::ConfirmSkipPreparation() {
+void LoadingScreen::OnControllerKey(Qt::Key key) {
+    if (!isVisible()) {
+        return;
+    }
+    const bool a = key == Qt::Key_Return || key == Qt::Key_Enter;
+    const bool b = key == Qt::Key_Escape;
     if (skip_confirm) {
+        if (a && skip_confirm_primary) {
+            skip_confirm_primary->click();
+        } else if (b) {
+            skip_confirm->close();
+        }
+        return;
+    }
+    if (a && skip_button->isVisible() && skip_button->isEnabled()) {
+        ConfirmSkip();
+    }
+}
+
+void LoadingScreen::ConfirmSkip() {
+    if (skip_confirm) {
+        return;
+    }
+    if (previous_stage == VideoCore::LoadCallbackStage::Warm) {
+        auto* const box = new QMessageBox(
+            QMessageBox::Warning, tr("Skip Loading Shaders?"),
+            tr("The game starts right away, but it can stutter while the shaders that are not "
+               "loaded yet build in the background as it first uses them. A later launch "
+               "precaches the rest.\n\nController: A skips, B goes back."),
+            QMessageBox::NoButton, window());
+        QPushButton* const skip = box->addButton(tr("Skip"), QMessageBox::AcceptRole);
+        QPushButton* const cancel = box->addButton(QMessageBox::Cancel);
+        box->setDefaultButton(cancel);
+        box->setEscapeButton(cancel);
+        box->setAttribute(Qt::WA_DeleteOnClose);
+        connect(box, &QMessageBox::buttonClicked, this, [this, skip](QAbstractButton* button) {
+            if (button == skip && previous_stage == VideoCore::LoadCallbackStage::Warm) {
+                VideoCommon::ShaderWarm::RequestSkipWarm();
+                skip_button->setEnabled(false);
+            }
+        });
+        skip_confirm = box;
+        skip_confirm_primary = skip;
+        box->open();
         return;
     }
     using VideoCommon::ShaderWarm::PrepareSkip;
@@ -298,7 +342,8 @@ void LoadingScreen::ConfirmSkipPreparation() {
            "game first uses them.\n\nCompile in background: the rest is prepared on a few "
            "shader threads while you play, which can take a long while.\nSkip: nothing more is "
            "prepared until the next launch.\n\nEither way, what is already prepared is kept, "
-           "and a later launch continues where this one stops. %1")
+           "and a later launch continues where this one stops. %1\n\nController: A compiles "
+           "in the background, B goes back.")
             .arg(ConfigurationShared::PrecompiledPrepareRerunCauses()),
         QMessageBox::NoButton, window());
     QPushButton* const background =
@@ -320,6 +365,7 @@ void LoadingScreen::ConfirmSkipPreparation() {
                 }
             });
     skip_confirm = box;
+    skip_confirm_primary = background;
     box->open();
 }
 
@@ -396,7 +442,11 @@ void LoadingScreen::RebuildBackdrop() {
                                     static_cast<double>(target.height()) / art.height());
     int darken = 51;
     QImage soft;
-    if (stretch <= 2.2) {
+    if (stretch <= 1.5) {
+        // Fanart near the screen's size: shown as it is, only a little darker for the text.
+        soft = cropped;
+        darken = 34;
+    } else if (stretch <= 2.2) {
         soft = cropped;
     } else if (stretch <= 4.0) {
         soft = Soften(cropped, 2.0);

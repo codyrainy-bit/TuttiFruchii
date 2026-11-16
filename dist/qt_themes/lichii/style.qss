@@ -846,26 +846,6 @@ QDialog#AboutDialog QLabel#labelLiability {
     color: #8b8d94;
 }
 
-/* What's new ------------------------------------------------------------ */
-
-QDialog#WhatsNewDialog QLabel#WhatsNewText {
-    color: #9b9da4;
-}
-
-QDialog#WhatsNewDialog QLabel#WhatsNewBadge {
-    background-color: rgba(65, 105, 225, 0.16);
-    border-radius: 8px;
-}
-
-QDialog#WhatsNewDialog QWidget#WhatsNewItem {
-    border-bottom: 1px solid #212226;
-}
-
-QDialog#WhatsNewDialog QWidget#WhatsNewFooter {
-    background-color: #141518;
-    border-top: 1px solid #2a2b30;
-}
-
 /* Status bar: setting chips on the left, stats on the right ------------- */
 
 QStatusBar {

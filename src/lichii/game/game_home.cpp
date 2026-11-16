@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cmath>
+#include <numbers>
+
+#include <SDL3/SDL.h>
 
 #include <QAction>
+#include <QConicalGradient>
 #include <QEasingCurve>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -18,30 +23,29 @@
 #include <QPixmapCache>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QStandardItemModel>
 #include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 
+#include "common/logging.h"
+#include "common/settings.h"
 #include "frontend_common/play_time_manager.h"
 #include "lichii/game/common.h"
 #include "lichii/game/game_home.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
+#include "qt_common/config/uisettings.h"
 #include "qt_common/util/game.h"
 
 namespace {
 
 const QColor Accent{0x41, 0x69, 0xe1};
-const QColor AccentLight{0x9d, 0xb8, 0xff};
-
-QColor Mix(const QColor& a, const QColor& b, qreal t) {
-    return QColor::fromRgbF(static_cast<float>(a.redF() + (b.redF() - a.redF()) * t),
-                            static_cast<float>(a.greenF() + (b.greenF() - a.greenF()) * t),
-                            static_cast<float>(a.blueF() + (b.blueF() - a.blueF()) * t));
-}
-
+/// Room to each side of a cover; the selection ring reaches RingOverflow past it.
+constexpr int CardSidePad = 4;
+constexpr int RingOverflow = 18;
 bool IsGame(const QModelIndex& index) {
     return index.data(GameListItem::TypeRole).toInt() == static_cast<int>(GameListItemType::Game);
 }
@@ -89,7 +93,7 @@ QWidget#HomePillBar, QWidget#HomeHeader, QWidget#HomeChipBar, QWidget#HomeHintBa
 }
 QPushButton#HomePill {
     background-color: #1a1b1f; color: #e6e7ea; border: 2px solid #2a2c31;
-    border-radius: 10px; font-size: 15px; padding: 0 22px; min-height: 42px; max-height: 42px;
+    border-radius: 10px; font-size: 15px; padding: 0 22px; min-height: 40px; max-height: 40px;
 }
 QPushButton#HomePill:hover { background-color: #23252a; }
 QPushButton#HomePill[homeFocus="true"] {
@@ -133,9 +137,11 @@ protected:
         const QRectF box = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
 
         if (style == GameHome::ButtonStyle::Keyboard) {
-            painter.setPen(QPen(light, 1.5));
-            painter.setBrush(QColor(0x22, 0x23, 0x28));
+            // A light key cap that reads on dark and on the accent-colored button alike.
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 255, 255, 38));
             painter.drawRoundedRect(box, 5, 5);
+            painter.setPen(light);
             QFont key_font = font();
             key_font.setPixelSize(12);
             key_font.setBold(true);
@@ -189,8 +195,9 @@ protected:
             break;
         }
         case GameHome::ButtonStyle::PlayStation: {
-            painter.setPen(QPen(QColor(0x5c, 0x5e, 0x65), 1.5));
-            painter.setBrush(QColor(0x1e, 0x1f, 0x23));
+            // The symbol on a faint light disc: no dark outline around it.
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 255, 255, 34));
             painter.drawEllipse(box);
             const QPointF c = QRectF(rect()).center();
             const qreal r = width() * 0.22;
@@ -252,7 +259,134 @@ private:
     GameHome::HintRole role;
 };
 
+/// The selection ring: a rainbow that slowly flows around the tile (phase 0..1 is one turn), with
+/// a soft glow, while the cards have the focus; a thin accent outline otherwise.
+void DrawSelectionRing(QPainter* painter, const QRectF& tile, qreal radius, bool focused,
+                       qreal phase) {
+    constexpr qreal Offset = 8;
+    const QRectF ring = tile.adjusted(-Offset, -Offset, Offset, Offset);
+    const qreal ring_radius = radius + Offset;
+    painter->save();
+    painter->setBrush(Qt::NoBrush);
+    if (!focused) {
+        QColor dim = Accent;
+        dim.setAlpha(110);
+        painter->setPen(QPen(dim, 2));
+        painter->drawRoundedRect(ring, ring_radius, ring_radius);
+        painter->restore();
+        return;
+    }
+    QConicalGradient gradient(ring.center(), -phase * 360.0);
+    constexpr int Stops = 12;
+    for (int i = 0; i <= Stops; ++i) {
+        const qreal t = static_cast<qreal>(i) / Stops;
+        gradient.setColorAt(t, QColor::fromHsvF(static_cast<float>(i == Stops ? 0.0 : t), 0.7f,
+                                                1.0f));
+    }
+    painter->setOpacity(0.3);
+    painter->setPen(QPen(QBrush(gradient), 16));
+    painter->drawRoundedRect(ring, ring_radius, ring_radius);
+    painter->setOpacity(1.0);
+    painter->setPen(QPen(QBrush(gradient), 6));
+    painter->drawRoundedRect(ring, ring_radius, ring_radius);
+    painter->restore();
+}
+
 } // namespace
+
+/// A short, soft tick played as the selection moves from game to game, synthesized once and
+/// played through SDL (already linked for controllers). The device is opened on the first tick
+/// and closed when the home view hides, before a game's own audio starts.
+class HomeSound {
+public:
+    ~HomeSound() {
+        Close();
+    }
+
+    void Play() {
+        if (!UISettings::values.home_sounds.GetValue() || Settings::values.audio_muted) {
+            return;
+        }
+        const float volume =
+            std::clamp(static_cast<float>(Settings::values.volume.GetValue()) / 100.0f, 0.0f,
+                       2.0f);
+        if (volume <= 0.0f || !Open()) {
+            return;
+        }
+        std::vector<float> samples = tick;
+        for (float& sample : samples) {
+            sample *= volume;
+        }
+        // A new tick replaces one still playing, so fast scrolling never queues up.
+        SDL_ClearAudioStream(stream);
+        SDL_PutAudioStreamData(stream, samples.data(),
+                               static_cast<int>(samples.size() * sizeof(float)));
+    }
+
+    void Close() {
+        if (stream != nullptr) {
+            SDL_DestroyAudioStream(stream);
+            stream = nullptr;
+        }
+        if (audio_initialized) {
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+            audio_initialized = false;
+        }
+    }
+
+private:
+    bool Open() {
+        if (stream != nullptr) {
+            return true;
+        }
+        if (failed) {
+            return false;
+        }
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            LOG_WARNING(Frontend, "Home view sound: no audio ({})", SDL_GetError());
+            failed = true;
+            return false;
+        }
+        audio_initialized = true;
+        const SDL_AudioSpec spec{SDL_AUDIO_F32, 1, SampleRate};
+        stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr,
+                                           nullptr);
+        if (stream == nullptr) {
+            LOG_WARNING(Frontend, "Home view sound: no playback device ({})", SDL_GetError());
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+            audio_initialized = false;
+            failed = true;
+            return false;
+        }
+        SDL_ResumeAudioStreamDevice(stream);
+        if (tick.empty()) {
+            BuildTick();
+        }
+        return true;
+    }
+
+    /// ~40 ms: a quick attack and a fast decay on a bright tone with a softer octave below, like
+    /// a console menu's tick.
+    void BuildTick() {
+        constexpr int Length = SampleRate * 40 / 1000;
+        constexpr double Tau = 2.0 * std::numbers::pi;
+        tick.resize(Length);
+        for (int i = 0; i < Length; ++i) {
+            const double t = static_cast<double>(i) / SampleRate;
+            const double envelope = std::min(1.0, t / 0.0008) * std::exp(-t / 0.0085);
+            const double tone = 0.55 * std::sin(Tau * 1850.0 * t) +
+                                0.25 * std::sin(Tau * 3700.0 * t) +
+                                0.20 * std::sin(Tau * 925.0 * t);
+            tick[static_cast<size_t>(i)] = static_cast<float>(0.2 * envelope * tone);
+        }
+    }
+
+    static constexpr int SampleRate = 48000;
+    SDL_AudioStream* stream = nullptr;
+    bool audio_initialized = false;
+    bool failed = false;
+    std::vector<float> tick;
+};
 
 /// Paints one game as a large square cover with rounded corners, and the selection ring around the
 /// selected one.
@@ -260,13 +394,16 @@ class HomeCard : public QStyledItemDelegate {
 public:
     explicit HomeCard(GameHome* home_) : QStyledItemDelegate{home_}, home{home_} {}
 
-    void SetGeometry(int side_, int ring_) {
+    /// The cover's side, and the room around it: little to the sides (the selection ring spills
+    /// into the gap between games, so they can sit close), enough above and below for the ring.
+    void SetGeometry(int side_, int side_pad_, int ring_) {
         side = side_;
+        side_pad = side_pad_;
         ring = ring_;
     }
 
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
-        return {side + 2 * ring, side + 2 * ring};
+        return {side + 2 * side_pad, side + 2 * ring};
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
@@ -275,7 +412,7 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
         painter->setRenderHint(QPainter::SmoothPixmapTransform);
 
-        const QRect card = option.rect.adjusted(ring, ring, -ring, -ring);
+        const QRect card = option.rect.adjusted(side_pad, ring, -side_pad, -ring);
         const qreal radius = std::max(8.0, card.width() * 0.045);
         QPainterPath path;
         path.addRoundedRect(QRectF(card), radius, radius);
@@ -298,25 +435,18 @@ public:
                               index.data(GameListItemPath::TitleRole).toString());
         }
 
-        const bool selected = index == home->currentIndex();
-        if (selected) {
-            const QRectF ring_rect = QRectF(card).adjusted(-6, -6, 6, 6);
-            if (home->CardsFocused()) {
-                // A soft glow, then the ring, pulsing between the accent and a lighter blue.
-                const QColor color = Mix(Accent, AccentLight, home->Pulse());
-                QColor glow = color;
-                glow.setAlpha(60);
-                painter->setPen(QPen(glow, 10));
+        if (index == home->currentIndex() && !home->PlusSelected()) {
+            if (home->Reordering()) {
+                // Picked up: a solid white ring.
+                const QRectF ring = QRectF(card).adjusted(-8, -8, 8, 8);
                 painter->setBrush(Qt::NoBrush);
-                painter->drawRoundedRect(ring_rect, radius + 6, radius + 6);
-                painter->setPen(QPen(color, 4));
-                painter->drawRoundedRect(ring_rect, radius + 6, radius + 6);
+                painter->setPen(QPen(QColor(255, 255, 255, 70), 16));
+                painter->drawRoundedRect(ring, radius + 8, radius + 8);
+                painter->setPen(QPen(QColor(255, 255, 255), 6));
+                painter->drawRoundedRect(ring, radius + 8, radius + 8);
             } else {
-                QColor dim = Accent;
-                dim.setAlpha(110);
-                painter->setPen(QPen(dim, 2));
-                painter->setBrush(Qt::NoBrush);
-                painter->drawRoundedRect(ring_rect, radius + 6, radius + 6);
+                DrawSelectionRing(painter, QRectF(card), radius, home->CardsFocused(),
+                                  home->Pulse());
             }
         }
         painter->restore();
@@ -365,6 +495,7 @@ private:
 
     GameHome* home;
     int side = 280;
+    int side_pad = 4;
     int ring = 12;
 };
 
@@ -433,17 +564,50 @@ GameHome::GameHome(QWidget* parent) : QListView{parent} {
     connect(scroll_animation, &QVariantAnimation::valueChanged, this,
             [this](const QVariant& value) { horizontalScrollBar()->setValue(value.toInt()); });
 
+    // One slow, even turn of the rainbow around the selected tile every six seconds.
     pulse_animation = new QVariantAnimation(this);
     pulse_animation->setStartValue(0.0);
-    pulse_animation->setKeyValueAt(0.5, 1.0);
-    pulse_animation->setEndValue(0.0);
-    pulse_animation->setDuration(1800);
+    pulse_animation->setEndValue(1.0);
+    pulse_animation->setDuration(6000);
     pulse_animation->setLoopCount(-1);
-    pulse_animation->setEasingCurve(QEasingCurve::InOutSine);
+    pulse_animation->setEasingCurve(QEasingCurve::Linear);
     connect(pulse_animation, &QVariantAnimation::valueChanged, this, [this] {
-        const QModelIndex current = currentIndex();
-        if (current.isValid() && row == Row::Cards) {
-            viewport()->update(visualRect(current).adjusted(-2, -2, 2, 2));
+        if (row != Row::Cards) {
+            return;
+        }
+        if (plus_selected) {
+            viewport()->update(PlusRect().adjusted(-RingOverflow, 0, RingOverflow, 0));
+        } else if (const QModelIndex current = currentIndex(); current.isValid()) {
+            viewport()->update(visualRect(current).adjusted(-RingOverflow, 0, RingOverflow, 0));
+        }
+    });
+
+    sound = std::make_unique<HomeSound>();
+
+    // Chips with a level (volume) ease toward a new one: they fill up and drain smoothly.
+    level_timer = new QTimer(this);
+    level_timer->setInterval(16);
+    connect(level_timer, &QTimer::timeout, this, [this] {
+        bool moving = false;
+        for (size_t i = 0; i < chips.size() && i < chip_levels.size(); ++i) {
+            if (!chips[i].level) {
+                continue;
+            }
+            const double target = std::clamp(chips[i].level(), 0.0, 1.0);
+            double& shown = chip_levels[i];
+            if (std::abs(target - shown) < 0.002) {
+                if (shown != target) {
+                    shown = target;
+                    StyleChip(i);
+                }
+                continue;
+            }
+            shown += (target - shown) * 0.22;
+            moving = true;
+            StyleChip(i);
+        }
+        if (!moving) {
+            level_timer->stop();
         }
     });
 
@@ -531,6 +695,12 @@ void GameHome::SetChips(std::vector<HomeChip> chips_) {
     }
     layout->setColumnStretch(static_cast<int>(chips.size()), 1);
     focused_chip = std::clamp(focused_chip, 0, std::max(0, static_cast<int>(chips.size()) - 1));
+    chip_levels.assign(chips.size(), 0.0);
+    for (size_t i = 0; i < chips.size(); ++i) {
+        if (chips[i].level) {
+            chip_levels[i] = chips[i].level();
+        }
+    }
     LayoutChrome();
     RefreshChips();
 }
@@ -548,6 +718,10 @@ void GameHome::RefreshChips() {
             button->setProperty("inactive", inactive);
             StyleChip(i);
         }
+        if (chips[i].level && i < chip_levels.size() &&
+            std::abs(chips[i].level() - chip_levels[i]) > 0.001) {
+            level_timer->start();
+        }
     }
 }
 
@@ -560,6 +734,7 @@ void GameHome::StyleChip(size_t index) {
     const bool inactive = button->property("inactive").toBool();
     const bool focus = button->property("homeFocus").toBool();
     const bool adjust = button->property("adjusting").toBool();
+    const bool has_level = static_cast<bool>(chips[index].level) && index < chip_levels.size();
     const auto rgba = [&color](double alpha) {
         return QStringLiteral("rgba(%1, %2, %3, %4)")
             .arg(color.red())
@@ -581,12 +756,31 @@ void GameHome::StyleChip(size_t index) {
     if (inactive && focus) {
         background = QStringLiteral("#202227");
     }
+    if (has_level) {
+        // Filled from the left up to the level, a fainter tint after it.
+        const double level = std::clamp(chip_levels[index], 0.0, 1.0);
+        const QString fill = inactive ? QStringLiteral("rgba(92, 94, 101, 0.35)")
+                                      : rgba(focus || adjust ? 0.55 : 0.42);
+        const QString rest = inactive ? QStringLiteral("#17181c") : rgba(focus ? 0.12 : 0.07);
+        background = QStringLiteral("qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 %1, "
+                                    "stop:%2 %1, stop:%3 %4, stop:1 %4)")
+                         .arg(fill)
+                         .arg(level, 0, 'f', 4)
+                         .arg(std::min(1.0, level + 0.002), 0, 'f', 4)
+                         .arg(rest);
+    }
     button->setStyleSheet(
         QStringLiteral("QPushButton { background-color: %1; color: %2; border: 2px solid %3;"
                        " border-radius: 8px; font-size: 15px; min-height: 44px;"
                        " max-height: 44px; padding: 0 10px; }"
-                       "QPushButton:hover { background-color: %4; }")
-            .arg(background, text, border, inactive ? QStringLiteral("#202227") : rgba(0.24)));
+                       "QPushButton:hover { background: %4; }")
+            .arg(background, text, border,
+                 has_level ? background
+                           : (inactive ? QStringLiteral("#202227") : rgba(0.24))));
+}
+
+QWidget* GameHome::CreateGlyph(ButtonStyle style, HintRole role, QWidget* parent) {
+    return new HomeGlyph(style, role, parent);
 }
 
 void GameHome::SetButtonStyle(ButtonStyle style) {
@@ -607,6 +801,20 @@ void GameHome::HideWhileShown(QWidget* bar) {
         bar->hide();
     }
     hidden_bars.push_back(entry);
+}
+
+bool GameHome::event(QEvent* event) {
+    // Esc backs out of reordering, adjusting and the menu or chip rows here; the main window's
+    // own Esc shortcut must not take it first.
+    if (event->type() == QEvent::ShortcutOverride) {
+        const auto* key = static_cast<QKeyEvent*>(event);
+        if ((key->key() == Qt::Key_Escape || key->key() == Qt::Key_Backspace) &&
+            (reordering || adjusting || row != Row::Cards)) {
+            event->accept();
+            return true;
+        }
+    }
+    return QListView::event(event);
 }
 
 bool GameHome::eventFilter(QObject* object, QEvent* event) {
@@ -670,33 +878,41 @@ void GameHome::LayoutChrome() {
     const int w = width();
     const int h = height();
 
-    constexpr int pill_top = 20;
-    constexpr int pill_h = 44;
+    // A pill is 40 px of text area and a 2 px border each side: the bar leaves room for both.
+    constexpr int pill_top = 16;
+    constexpr int pill_h = 50;
     constexpr int header_h = 66;
     constexpr int caption_h = 18;
-    constexpr int chip_h = 46;
+    constexpr int chip_h = 50;
     constexpr int cards_to_chips = 26;
     constexpr int chips_to_hints = 18;
     constexpr int hint_h = 44;
     constexpr int bottom_pad = 14;
-    ring_pad = 12;
+    ring_pad = 18; // The rainbow ring and its glow, around the cover.
 
     const int top_fixed = pill_top + pill_h;
     const int chips_block = caption_h + 6 + chip_h;
     const int bottom_fixed = cards_to_chips + chips_block + chips_to_hints + hint_h + bottom_pad;
+    // The list view also keeps its item spacing (the gap) above and below the cards, so the row
+    // is the card, the ring's room and a gap on each side: the cards stay square.
     const int available = h - top_fixed - header_h - bottom_fixed - 2 * ring_pad;
-    card_side = std::clamp(available, 120, 440);
-    const int extra = std::max(0, available - card_side);
+    // gap = max(18, card / 17), so card + 2 * gap fits when card is at most this:
+    int fitting = available * 17 / 19;
+    if (fitting < 18 * 17) {
+        fitting = available - 2 * 18;
+    }
+    card_side = std::clamp(fitting, 120, 620);
+    // The ring reaches 16 px past a cover: the gap plus both sides' padding leaves it room.
+    gap = std::max(18, card_side / 17);
+    const int view_h = card_side + 2 * ring_pad + 2 * gap;
+    const int extra = std::max(0, h - top_fixed - header_h - bottom_fixed - view_h);
     const int spacer_top = extra * 55 / 100;
 
     const int top = top_fixed + spacer_top + header_h;
-    const int view_h = card_side + 2 * ring_pad;
     const int bottom = std::max(0, h - top - view_h);
+    const int side_pad = gap + CardSidePad;
 
-    gap = std::max(14, card_side / 14);
-    const int side_pad = gap + ring_pad;
-
-    card_delegate->SetGeometry(card_side, ring_pad);
+    card_delegate->SetGeometry(card_side, CardSidePad, ring_pad);
     if (spacing() != gap) {
         setSpacing(gap);
     }
@@ -707,8 +923,10 @@ void GameHome::LayoutChrome() {
 
     const int inner_w = std::max(0, w - 2 * side_pad);
     pill_bar->setGeometry(side_pad, pill_top, inner_w, pill_h);
-    header->setGeometry(side_pad, top - header_h, inner_w, header_h - 4);
-    chip_bar->setGeometry(side_pad, top + view_h + cards_to_chips, inner_w, chips_block);
+    // The header sits right above the covers and the chips right below them, over the gap the
+    // view keeps around the row.
+    header->setGeometry(side_pad, top + gap - header_h, inner_w, header_h - 4);
+    chip_bar->setGeometry(side_pad, top + view_h - gap + cards_to_chips, inner_w, chips_block);
     // Up to 136 px a chip; narrower windows share the width out.
     if (!chip_buttons.empty()) {
         constexpr int chip_spacing = 14;
@@ -782,6 +1000,9 @@ void GameHome::hideEvent(QHideEvent* event) {
     pulse_animation->stop();
     refresh_timer->stop();
     adjusting = false;
+    FinishReorder(true);
+    // Free the audio device before a game opens its own.
+    sound->Close();
 }
 
 void GameHome::SetRow(Row row_) {
@@ -815,6 +1036,20 @@ void GameHome::UpdateFocusStyles() {
 }
 
 void GameHome::UpdateHeader() {
+    if (reordering && currentIndex().isValid()) {
+        status_label->setText(tr("Reorder Game Position: move it, then press Done"));
+        title_label->setText(
+            QStringLiteral("<span style=\"color:#ffffff;\">&#8644;</span>&nbsp;&nbsp;%1")
+                .arg(currentIndex().data(GameListItemPath::TitleRole).toString().toHtmlEscaped()));
+        return;
+    }
+    if (plus_selected) {
+        status_label->setText(tr("Add a folder with your games"));
+        title_label->setText(
+            QStringLiteral("<span style=\"color:#4169e1;\">&#9679;</span>&nbsp;&nbsp;%1")
+                .arg(tr("Add Games")));
+        return;
+    }
     const QModelIndex current = currentIndex();
     if (!current.isValid() || isRowHidden(current.row())) {
         status_label->clear();
@@ -850,8 +1085,16 @@ void GameHome::UpdateHints() {
     std::vector<Hint> hints;
     switch (row) {
     case Row::Cards:
-        hints = {{HintRole::Options, tr("Options"), [this] { OpenOptions(); }},
-                 {HintRole::Confirm, tr("Play"), [this] { ActivateCurrent(); }}};
+        if (reordering) {
+            hints = {{HintRole::Adjust, tr("Move"), nullptr},
+                     {HintRole::Back, tr("Cancel"), [this] { FinishReorder(false); }},
+                     {HintRole::Confirm, tr("Done"), [this] { FinishReorder(true); }}};
+        } else if (plus_selected) {
+            hints = {{HintRole::Confirm, tr("Add Games"), [this] { ActivateCurrent(); }}};
+        } else {
+            hints = {{HintRole::Options, tr("Options"), [this] { OpenOptions(); }},
+                     {HintRole::Confirm, tr("Play"), [this] { ActivateCurrent(); }}};
+        }
         break;
     case Row::Chips:
         if (adjusting) {
@@ -917,31 +1160,222 @@ void GameHome::EnsureCurrent() {
     }
 }
 
-void GameHome::MoveSelection(int delta) {
-    if (model() == nullptr) {
-        return;
-    }
+std::vector<int> GameHome::VisibleRows() const {
     std::vector<int> visible;
+    if (model() == nullptr) {
+        return visible;
+    }
     for (int i = 0; i < model()->rowCount(); ++i) {
         if (!isRowHidden(i)) {
             visible.push_back(i);
         }
     }
-    if (visible.empty()) {
+    return visible;
+}
+
+void GameHome::MoveSelection(int delta) {
+    // Positions 0..size-1 are the games, size is the "+" tile after them.
+    const std::vector<int> visible = VisibleRows();
+    const int size = static_cast<int>(visible.size());
+    int position = size;
+    if (!plus_selected) {
+        const auto it = std::find(visible.begin(), visible.end(), currentIndex().row());
+        position = it == visible.end() ? 0 : static_cast<int>(it - visible.begin());
+    }
+    const int next = std::clamp(position + delta, 0, size);
+    if (next == position) {
         return;
     }
-    const auto it = std::find(visible.begin(), visible.end(), currentIndex().row());
-    const int position = it == visible.end() ? 0 : static_cast<int>(it - visible.begin());
+    if (next == size) {
+        SelectPlus(true);
+    } else {
+        SelectPlus(false);
+        setCurrentIndex(model()->index(visible[static_cast<size_t>(next)], 0));
+    }
+    sound->Play();
+}
+
+void GameHome::SelectPlus(bool selected) {
+    if (plus_selected == selected) {
+        return;
+    }
+    plus_selected = selected;
+    if (plus_selected) {
+        ScrollToRect(PlusRect());
+    } else if (currentIndex().isValid()) {
+        ScrollToRect(visualRect(currentIndex()));
+    }
+    UpdateHeader();
+    UpdateHints();
+    viewport()->update();
+}
+
+QRect GameHome::PlusRect() const {
+    const std::vector<int> visible = VisibleRows();
+    const int tile_w = card_side + 2 * CardSidePad;
+    const int tile_h = card_side + 2 * ring_pad;
+    if (visible.empty()) {
+        return {spacing() - horizontalScrollBar()->value(), spacing(), tile_w, tile_h};
+    }
+    // Exactly a game card's box, one gap after the last game.
+    const QRect last = visualRect(model()->index(visible.back(), 0));
+    return {last.right() + 1 + spacing(), last.top(), last.width(), last.height()};
+}
+
+void GameHome::updateGeometries() {
+    QListView::updateGeometries();
+    // Room for the "+" tile after the last game.
+    QScrollBar* bar = horizontalScrollBar();
+    const QRect plus = PlusRect().translated(bar->value(), 0);
+    const int needed = std::max(0, plus.right() + 1 + spacing() - viewport()->width());
+    if (needed > bar->maximum()) {
+        bar->setRange(0, needed);
+    }
+}
+
+void GameHome::paintEvent(QPaintEvent* event) {
+    QListView::paintEvent(event);
+
+    // The "+" tile, as the game list's "Add New Game Directory" entry.
+    const QRect rect = PlusRect();
+    if (!event->rect().intersects(rect.adjusted(-RingOverflow, 0, RingOverflow, 0))) {
+        return;
+    }
+    QPainter painter(viewport());
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRectF tile =
+        QRectF(rect).adjusted(CardSidePad, ring_pad, -CardSidePad, -ring_pad);
+    const qreal radius = std::max(8.0, tile.width() * 0.045);
+    painter.setPen(QPen(QColor(0x34, 0x36, 0x3c), 2));
+    painter.setBrush(QColor(0x18, 0x19, 0x1d));
+    painter.drawRoundedRect(tile, radius, radius);
+
+    const QPointF c = tile.center() - QPointF(0, tile.height() * 0.06);
+    const qreal arm = tile.width() * 0.12;
+    painter.setPen(QPen(QColor(0xc4, 0xc5, 0xca), std::max(4.0, tile.width() * 0.025),
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(c - QPointF(arm, 0), c + QPointF(arm, 0));
+    painter.drawLine(c - QPointF(0, arm), c + QPointF(0, arm));
+
+    QFont font = painter.font();
+    font.setPixelSize(std::max(13, static_cast<int>(tile.width() / 16)));
+    painter.setFont(font);
+    painter.setPen(QColor(0x9b, 0x9d, 0xa4));
+    painter.drawText(QRectF(tile.left(), c.y() + arm * 1.6, tile.width(), tile.height() * 0.2),
+                     Qt::AlignHCenter | Qt::AlignTop, tr("Add Games"));
+
+    if (plus_selected) {
+        DrawSelectionRing(&painter, tile, radius, CardsFocused(), Pulse());
+    }
+}
+
+void GameHome::BeginReorder() {
+    if (plus_selected || !currentIndex().isValid()) {
+        return;
+    }
+    SetRow(Row::Cards);
+    reordering = true;
+    reorder_original.clear();
+    for (const int row : VisibleRows()) {
+        reorder_original.push_back(
+            model()->index(row, 0).data(GameListItemPath::ProgramIdRole).toULongLong());
+    }
+    setFocus(Qt::OtherFocusReason);
+    UpdateHeader();
+    UpdateHints();
+    viewport()->update();
+}
+
+void GameHome::FinishReorder(bool keep) {
+    if (!reordering) {
+        return;
+    }
+    reordering = false;
+    if (!keep) {
+        // Put every game back where it was.
+        auto* game_model = qobject_cast<QStandardItemModel*>(model());
+        const u64 selected =
+            currentIndex().data(GameListItemPath::ProgramIdRole).toULongLong();
+        int target = 0;
+        for (const u64 program_id : reorder_original) {
+            for (int row = target; game_model != nullptr && row < game_model->rowCount(); ++row) {
+                const QModelIndex index = game_model->index(row, 0);
+                if (!IsGame(index) ||
+                    index.data(GameListItemPath::ProgramIdRole).toULongLong() != program_id) {
+                    continue;
+                }
+                if (row != target) {
+                    const QList<QStandardItem*> items = game_model->takeRow(row);
+                    game_model->insertRow(target, items);
+                }
+                ++target;
+                break;
+            }
+        }
+        SelectProgram(selected);
+    }
+    UpdateHeader();
+    UpdateHints();
+    viewport()->update();
+    emit ReorderFinished(keep);
+}
+
+void GameHome::SelectProgram(u64 program_id) {
+    if (model() == nullptr) {
+        return;
+    }
+    for (int i = 0; i < model()->rowCount(); ++i) {
+        const QModelIndex index = model()->index(i, 0);
+        if (index.data(GameListItemPath::ProgramIdRole).toULongLong() == program_id &&
+            IsGame(index)) {
+            SelectPlus(false);
+            setCurrentIndex(index);
+            return;
+        }
+    }
+}
+
+void GameHome::MoveCurrentGame(int delta) {
+    auto* game_model = qobject_cast<QStandardItemModel*>(model());
+    const QModelIndex current = currentIndex();
+    if (game_model == nullptr || !current.isValid()) {
+        return;
+    }
+    const std::vector<int> visible = VisibleRows();
+    const auto it = std::find(visible.begin(), visible.end(), current.row());
+    if (it == visible.end()) {
+        return;
+    }
+    const int position = static_cast<int>(it - visible.begin());
     const int next = std::clamp(position + delta, 0, static_cast<int>(visible.size()) - 1);
-    setCurrentIndex(model()->index(visible[static_cast<size_t>(next)], 0));
+    if (next == position) {
+        return;
+    }
+    // Taking the row out shifts the ones after it; inserting at the target's old row puts the
+    // game after the target when moving right and before it when moving left.
+    const int from = current.row();
+    const int to = visible[static_cast<size_t>(next)];
+    const QList<QStandardItem*> items = game_model->takeRow(from);
+    game_model->insertRow(to, items);
+    setCurrentIndex(game_model->index(to, 0));
+    ScrollToRect(visualRect(currentIndex()));
+    sound->Play();
 }
 
 void GameHome::StepSelection(int delta) {
     SetRow(Row::Cards);
+    if (reordering) {
+        MoveCurrentGame(delta);
+        return;
+    }
     MoveSelection(delta);
 }
 
 void GameHome::ActivateCurrent() {
+    if (plus_selected) {
+        emit AddGamesRequested();
+        return;
+    }
     const QModelIndex current = currentIndex();
     if (current.isValid() && !isRowHidden(current.row())) {
         emit activated(current);
@@ -949,6 +1383,9 @@ void GameHome::ActivateCurrent() {
 }
 
 void GameHome::OpenOptions() {
+    if (plus_selected) {
+        return;
+    }
     const QModelIndex current = currentIndex();
     if (current.isValid() && !isRowHidden(current.row())) {
         emit customContextMenuRequested(visualRect(current).center());
@@ -987,11 +1424,13 @@ void GameHome::ActivateChip(int index) {
 }
 
 void GameHome::scrollTo(const QModelIndex& index, ScrollHint) {
-    if (!index.isValid()) {
-        return;
+    if (index.isValid()) {
+        ScrollToRect(visualRect(index));
     }
+}
+
+void GameHome::ScrollToRect(const QRect& rect) {
     QScrollBar* bar = horizontalScrollBar();
-    const QRect rect = visualRect(index);
     const int look_ahead = card_side / 2;
     const int value = scroll_animation->state() == QAbstractAnimation::Running
                           ? scroll_animation->endValue().toInt()
@@ -1023,7 +1462,19 @@ void GameHome::currentChanged(const QModelIndex& current, const QModelIndex& pre
 }
 
 void GameHome::mousePressEvent(QMouseEvent* event) {
+    FinishReorder(true);
     SetRow(Row::Cards);
+    if (PlusRect().contains(event->position().toPoint())) {
+        SelectPlus(true);
+        if (event->button() == Qt::LeftButton) {
+            emit AddGamesRequested();
+        }
+        event->accept();
+        return;
+    }
+    if (indexAt(event->position().toPoint()).isValid()) {
+        SelectPlus(false);
+    }
     QListView::mousePressEvent(event);
 }
 
@@ -1031,6 +1482,24 @@ void GameHome::keyPressEvent(QKeyEvent* event) {
     const int key = event->key();
     const bool confirm = key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Space;
     const bool back = key == Qt::Key_Escape || key == Qt::Key_Backspace;
+
+    if (reordering) {
+        if (key == Qt::Key_Left) {
+            MoveCurrentGame(-1);
+        } else if (key == Qt::Key_Right) {
+            MoveCurrentGame(1);
+        } else if (key == Qt::Key_PageUp) {
+            MoveCurrentGame(-5);
+        } else if (key == Qt::Key_PageDown) {
+            MoveCurrentGame(5);
+        } else if (confirm) {
+            FinishReorder(true);
+        } else if (back) {
+            FinishReorder(false);
+        }
+        event->accept();
+        return;
+    }
 
     switch (row) {
     case Row::Cards:
@@ -1049,10 +1518,12 @@ void GameHome::keyPressEvent(QKeyEvent* event) {
         } else if (key == Qt::Key_Up) {
             if (!pills.empty()) {
                 SetRow(Row::Menus);
+                sound->Play();
             }
         } else if (key == Qt::Key_Down) {
             if (!chip_buttons.empty()) {
                 SetRow(Row::Chips);
+                sound->Play();
             }
         } else if (confirm) {
             ActivateCurrent();
@@ -1081,14 +1552,17 @@ void GameHome::keyPressEvent(QKeyEvent* event) {
                 UpdateFocusStyles();
                 UpdateHints();
             }
-        } else if (key == Qt::Key_Left) {
-            focused_chip = std::max(0, focused_chip - 1);
-            UpdateFocusStyles();
-        } else if (key == Qt::Key_Right) {
-            focused_chip = std::min(count - 1, focused_chip + 1);
-            UpdateFocusStyles();
+        } else if (key == Qt::Key_Left || key == Qt::Key_Right) {
+            const int next = std::clamp(focused_chip + (key == Qt::Key_Left ? -1 : 1), 0,
+                                        count - 1);
+            if (next != focused_chip) {
+                focused_chip = next;
+                UpdateFocusStyles();
+                sound->Play();
+            }
         } else if (key == Qt::Key_Up || back) {
             SetRow(Row::Cards);
+            sound->Play();
         } else if (confirm) {
             ActivateChip(focused_chip);
         }
@@ -1096,14 +1570,17 @@ void GameHome::keyPressEvent(QKeyEvent* event) {
     }
     case Row::Menus: {
         const int count = static_cast<int>(pills.size());
-        if (key == Qt::Key_Left) {
-            focused_pill = std::max(0, focused_pill - 1);
-            UpdateFocusStyles();
-        } else if (key == Qt::Key_Right) {
-            focused_pill = std::min(count - 1, focused_pill + 1);
-            UpdateFocusStyles();
+        if (key == Qt::Key_Left || key == Qt::Key_Right) {
+            const int next = std::clamp(focused_pill + (key == Qt::Key_Left ? -1 : 1), 0,
+                                        count - 1);
+            if (next != focused_pill) {
+                focused_pill = next;
+                UpdateFocusStyles();
+                sound->Play();
+            }
         } else if (key == Qt::Key_Down || back) {
             SetRow(Row::Cards);
+            sound->Play();
         } else if (confirm) {
             OpenMenu(focused_pill);
         }
