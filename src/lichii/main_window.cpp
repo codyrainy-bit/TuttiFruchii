@@ -47,7 +47,6 @@
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
 #include "lichii/shader_warm_dialog.h"
-#include "lichii/whats_new_dialog.h"
 #include "loading_screen.h"
 #include "qt_common/util/vk.h"
 #include "ryujinx_dialog.h"
@@ -442,13 +441,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     default_theme_paths = QIcon::themeSearchPaths();
 
-    // The first launch after an interface update switches to Lichii Dark and explains what moved.
-    const bool whats_new_pending =
-        UISettings::values.whats_new_version.GetValue() < WhatsNewDialog::Version;
-    if (whats_new_pending) {
-        UISettings::values.whats_new_version = WhatsNewDialog::Version;
+    // The first launch of a new version shows its changelog once. Profiles from before the
+    // Lichii redesign also switch to Lichii Dark.
+    const u32 seen_version = UISettings::values.whats_new_version.GetValue();
+    const bool whats_new_pending = seen_version < UpdateDialog::ChangelogVersion;
+    if (seen_version < 1) {
         UISettings::values.theme =
             UISettings::themes[static_cast<size_t>(UISettings::Theme::LichiiDark)].second;
+    }
+    if (whats_new_pending) {
+        UISettings::values.whats_new_version = UpdateDialog::ChangelogVersion;
     }
     UpdateUITheme();
 
@@ -474,6 +476,22 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     UpdateWindowTitle();
 
     show();
+
+#if defined(ENABLE_UPDATE_CHECKER) && defined(_WIN32)
+    // The installer helper was lichii-updater.exe before TuttiFruchii-updater.exe.
+    UpdateDialog::RemoveOldHelper();
+#endif
+
+    // TUTTIFRUCHII_TEST_UPDATE=1 shows the update prompt with a made-up release; "Update" in it
+    // only pretends to download.
+    if (qEnvironmentVariableIntValue("TUTTIFRUCHII_TEST_UPDATE") == 1) {
+        QTimer::singleShot(1200, this, [this] {
+            UpdateHomeButtonStyle();
+            UpdateDialog dialog(UpdateDialog::TestRelease(), this,
+                                game_list->Home()->CurrentButtonStyle(), true);
+            dialog.exec();
+        });
+    }
 
 #ifdef ENABLE_UPDATE_CHECKER
     if (UISettings::values.check_for_updates) {
@@ -517,9 +535,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
     game_list->PopulateAsync(UISettings::values.game_dirs);
 
-    if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
-        UISettings::values.show_whats_new.GetValue()) {
-        QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
+    if (whats_new_pending) {
+        // Once the window is laid out and the controllers are known, for the button hints.
+        QTimer::singleShot(800, this, &MainWindow::OnWhatsNew);
     }
 
     // Set up game list mode checkboxes.
@@ -539,6 +557,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // Controllers can be plugged in at any time; looking every two seconds is cheap.
     gamepad_timer.setInterval(2000);
     connect(&gamepad_timer, &QTimer::timeout, this, &MainWindow::CheckForGamepad);
+    connect(&gamepad_timer, &QTimer::timeout, this, &MainWindow::UpdateHomeButtonStyle);
     gamepad_timer.start();
     QTimer::singleShot(500, this, &MainWindow::CheckForGamepad);
     update_input_timer.start();
@@ -1353,6 +1372,8 @@ void MainWindow::InitializeWidgets() {
 
     statusBar()->setVisible(true);
     setStyleSheet(QStringLiteral("QStatusBar::item{border: none;}"));
+
+    SetupHomeView();
 }
 
 void MainWindow::InitializeDebugWidgets() {
@@ -1709,6 +1730,7 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Grid_View, &MainWindow::SetGridView);
     connect_menu(ui->action_Tree_View, &MainWindow::SetTreeView);
     connect_menu(ui->action_Carousel_View, &MainWindow::SetCarouselView);
+    connect_menu(ui->action_Home_View, &MainWindow::SetHomeView);
 
     game_size_actions = new QActionGroup(this);
     game_size_actions->setExclusive(true);
@@ -3679,7 +3701,21 @@ void MainWindow::OnGameListOpenDirectory(const QString& directory) {
 }
 
 void MainWindow::OnGameListAddDirectory() {
-    const QString dir_path = QFileDialog::getExistingDirectory(this, tr("Select Directory"));
+    QString dir_path;
+    if (UISettings::values.game_list_mode.GetValue() == Settings::GameListMode::HomeView) {
+        // Qt's own folder picker, not the desktop's: it runs in this window, so the controller
+        // can drive it (A opens a folder, B goes up one, + chooses the folder that is open).
+        QFileDialog dialog(this, tr("Select Directory"));
+        dialog.setFileMode(QFileDialog::Directory);
+        dialog.setOption(QFileDialog::ShowDirsOnly);
+        dialog.setOption(QFileDialog::DontUseNativeDialog);
+        dialog.setDirectory(QDir::homePath());
+        if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
+            dir_path = dialog.selectedFiles().front();
+        }
+    } else {
+        dir_path = QFileDialog::getExistingDirectory(this, tr("Select Directory"));
+    }
     if (dir_path.isEmpty()) {
         return;
     }
@@ -4384,6 +4420,7 @@ void MainWindow::SetGameListMode(Settings::GameListMode mode) {
     ui->action_Grid_View->setChecked(mode == Settings::GameListMode::GridView);
     ui->action_Tree_View->setChecked(mode == Settings::GameListMode::TreeView);
     ui->action_Carousel_View->setChecked(mode == Settings::GameListMode::CarouselView);
+    ui->action_Home_View->setChecked(mode == Settings::GameListMode::HomeView);
 
     UISettings::values.game_list_mode = mode;
     ui->action_Show_Game_Name->setEnabled(mode != Settings::GameListMode::TreeView);
@@ -4402,6 +4439,163 @@ void MainWindow::SetTreeView() {
 
 void MainWindow::SetCarouselView() {
     SetGameListMode(Settings::GameListMode::CarouselView);
+}
+
+void MainWindow::SetHomeView() {
+    SetGameListMode(Settings::GameListMode::HomeView);
+}
+
+void MainWindow::SetupHomeView() {
+    game_list->SetHomeMenuBar(ui->menubar);
+    // The chips below the games show the same settings: the status bar is hidden there.
+    game_list->Home()->HideWhileShown(statusBar());
+
+    const auto button_chip = [](const QString& caption, QPushButton* button, bool dims,
+                                QColor color) {
+        HomeChip chip;
+        chip.caption = caption;
+        chip.color = color;
+        chip.text = [button] {
+            QString text = button->text();
+            text.remove(QLatin1Char{'&'});
+            return text;
+        };
+        if (dims) {
+            chip.active = [button] { return button->isChecked(); };
+        }
+        chip.activate = [button] {
+            if (button->isEnabled()) {
+                button->click();
+            }
+        };
+        return chip;
+    };
+
+    std::vector<HomeChip> chips;
+    chips.push_back(button_chip(tr("Renderer"), renderer_status_button, false,
+                                QColor(0xf0, 0x38, 0x6b)));
+
+    // The Switch 2 VSync rate games start frames on. Above 60 only games with a real-time step
+    // (Ocarina of Time's FPS Unlock, for example) keep their speed.
+    HomeChip frame_rate;
+    frame_rate.caption = tr("Frame Rate");
+    frame_rate.color = QColor(0x4a, 0xde, 0x80);
+    frame_rate.text = [] {
+        return tr("%1 FPS").arg(Settings::values.frame_rate_limit.GetValue());
+    };
+    frame_rate.activate = [] {
+        static constexpr std::array<u16, 3> rates{30, 60, 120};
+        const u16 current = Settings::values.frame_rate_limit.GetValue();
+        u16 next = rates.front();
+        for (const u16 rate : rates) {
+            if (rate > current) {
+                next = rate;
+                break;
+            }
+        }
+        Settings::values.frame_rate_limit.SetValue(next);
+    };
+    chips.push_back(std::move(frame_rate));
+
+    chips.push_back(button_chip(tr("GPU Accuracy"), gpu_accuracy_button, false,
+                                QColor(0xf5, 0xb9, 0x42)));
+    chips.push_back(button_chip(tr("Mode"), dock_status_button, false, QColor(0x60, 0xa5, 0xfa)));
+    chips.push_back(button_chip(tr("Filter"), filter_status_button, true,
+                                QColor(0xa7, 0x8b, 0xfa)));
+    chips.push_back(button_chip(tr("Anti-Aliasing"), aa_status_button, true,
+                                QColor(0x22, 0xd3, 0xee)));
+    chips.push_back(button_chip(tr("Post Effects"), post_shader_status_button, true,
+                                QColor(0xa3, 0xd9, 0x5e)));
+    chips.push_back(button_chip(tr("Frame Gen"), frame_gen_status_button, true,
+                                QColor(0xff, 0x8a, 0x4c)));
+
+    HomeChip volume;
+    volume.caption = tr("Volume");
+    volume.color = QColor(0xe8, 0x79, 0xf9);
+    volume.text = [] {
+        if (Settings::values.audio_muted) {
+            return tr("Muted");
+        }
+        return QStringLiteral("%1%").arg(Settings::values.volume.GetValue());
+    };
+    volume.active = [] { return !Settings::values.audio_muted; };
+    // Full at 100%; the volume can go up to 200%.
+    volume.level = [] {
+        if (Settings::values.audio_muted) {
+            return 0.0;
+        }
+        return std::min(1.0, Settings::values.volume.GetValue() / 100.0);
+    };
+    volume.adjust = [this](int step) {
+        Settings::values.audio_muted = false;
+        const int value = std::clamp(static_cast<int>(Settings::values.volume.GetValue()) +
+                                         step * 5,
+                                     0, 200);
+        Settings::values.volume.SetValue(static_cast<u8>(value));
+        UpdateVolumeUI();
+    };
+    chips.push_back(std::move(volume));
+
+    game_list->SetHomeChips(std::move(chips));
+    UpdateHomeButtonStyle();
+}
+
+void MainWindow::UpdateHomeButtonStyle() {
+    if (!QtCommon::system || !input_subsystem || game_list == nullptr) {
+        return;
+    }
+    auto* const player1 =
+        QtCommon::system->HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    if (player1 == nullptr) {
+        return;
+    }
+    const auto param = player1->GetButtonParam(Settings::NativeButton::A);
+    const std::string engine = param.Get("engine", "");
+    auto style = GameHome::ButtonStyle::Keyboard;
+    if (engine == "joycon" || engine == "virtual_amiibo") {
+        style = GameHome::ButtonStyle::Switch;
+    } else if (engine == "sdl") {
+        // SDL names the pad: "DualSense Wireless Controller", "Xbox Series X Controller",
+        // "Nintendo Switch Pro Controller", ... Anything not Sony or Nintendo prints Xbox's
+        // letters (Stadia, 8BitDo in X-input mode and most others do).
+        style = GameHome::ButtonStyle::Xbox;
+        const std::string guid = param.Get("guid", "");
+        const int port = param.Get("port", 0);
+        for (const auto& device : input_subsystem->GetInputDevices()) {
+            if (device.Get("engine", "") != "sdl" || device.Get("guid", "") != guid ||
+                device.Get("port", 0) != port) {
+                continue;
+            }
+            const QString name = QString::fromStdString(device.Get("display", "")).toLower();
+            static const QStringList sony{
+                QStringLiteral("dualsense"),   QStringLiteral("dualshock"),
+                QStringLiteral("playstation"), QStringLiteral("ps3"),
+                QStringLiteral("ps4"),         QStringLiteral("ps5"),
+                QStringLiteral("sony"),        QStringLiteral("wireless controller"),
+            };
+            static const QStringList nintendo{
+                QStringLiteral("nintendo"), QStringLiteral("pro controller"),
+                QStringLiteral("joy-con"),  QStringLiteral("joycon"),
+                QStringLiteral("switch"),
+            };
+            const auto any_of = [&name](const QStringList& words) {
+                return std::ranges::any_of(words,
+                                           [&name](const QString& w) { return name.contains(w); });
+            };
+            if (name.contains(QStringLiteral("xbox")) || name.contains(QStringLiteral("x-box"))) {
+                // "Xbox Wireless Controller" would otherwise match Sony's plain name.
+                style = GameHome::ButtonStyle::Xbox;
+            } else if (any_of(sony)) {
+                style = GameHome::ButtonStyle::PlayStation;
+            } else if (any_of(nintendo)) {
+                style = GameHome::ButtonStyle::Switch;
+            }
+            break;
+        }
+    } else if (!engine.empty() && engine != "keyboard") {
+        style = GameHome::ButtonStyle::Xbox;
+    }
+    game_list->Home()->SetButtonStyle(style);
 }
 
 void MainWindow::CheckIconSize() {
@@ -4834,7 +5028,10 @@ bool MainWindow::question(QWidget* parent, const QString& title, const QString& 
 
     ControllerNavigation* controller_navigation =
         new ControllerNavigation(QtCommon::system->HIDCore(), box_dialog);
-    connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent,
+    // The d-pad's and the stick's directions both move the selection.
+    for (const auto signal : {&ControllerNavigation::TriggerKeyboardEvent,
+                              &ControllerNavigation::TriggerStickDirection})
+        connect(controller_navigation, signal,
             [box_dialog](Qt::Key key) {
                 QKeyEvent* event = new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier);
                 QCoreApplication::postEvent(box_dialog, event);
@@ -4920,11 +5117,20 @@ void MainWindow::OnInstallDecryptionKeys() {
 }
 
 void MainWindow::OnWhatsNew() {
-    WhatsNewDialog dialog(this);
-    dialog.exec();
-    if (dialog.OpenConfigureRequested()) {
-        OnConfigure();
+    if (whats_new_open) {
+        return;
     }
+    whats_new_open = true;
+    UpdateHomeButtonStyle();
+    UpdateDialog::ShowChangelog(this, game_list->Home()->CurrentButtonStyle());
+    whats_new_open = false;
+#ifdef ENABLE_UPDATE_CHECKER
+    // An update found while the changelog was open is offered after it.
+    if (update_waiting) {
+        update_waiting = false;
+        OnEmulatorUpdateAvailable();
+    }
+#endif
 }
 
 void MainWindow::OnAbout() {
@@ -5662,6 +5868,10 @@ void MainWindow::KeepNextendoSessionAlive() {
 
 #ifdef ENABLE_UPDATE_CHECKER
 void MainWindow::OnEmulatorUpdateAvailable() {
+    if (whats_new_open) {
+        update_waiting = true;
+        return;
+    }
     const auto result = update_future.result();
     if (result.failure == UpdateChecker::Failure::RateLimited) {
         statusBar()->showMessage(tr("Could not check for updates: GitHub rate limit reached. "
@@ -5687,7 +5897,8 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         return;
     }
 
-    UpdateDialog dialog(release, this);
+    UpdateHomeButtonStyle();
+    UpdateDialog dialog(release, this, game_list->Home()->CurrentButtonStyle());
     switch (dialog.exec()) {
     case UpdateDialog::SkipVersion:
         UISettings::values.skipped_update_tag = release.tag;

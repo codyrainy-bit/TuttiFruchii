@@ -55,6 +55,7 @@ private:
 
     std::unique_ptr<Ui::ConfigureUi> ui;
     QLineEdit* steamgriddb_key_edit = nullptr;
+    QCheckBox* home_sounds_checkbox = nullptr;
     QCheckBox* download_covers_checkbox = nullptr;
 
     Settings::AspectRatio ratio;

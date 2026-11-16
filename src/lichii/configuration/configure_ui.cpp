@@ -142,6 +142,12 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
            "choose Download Cover Art to fetch one game again."));
     ui->GeneralVerticalLayout->addWidget(download_covers_checkbox);
 
+    home_sounds_checkbox = new QCheckBox(tr("Play a sound when moving between games"), this);
+    home_sounds_checkbox->setToolTip(
+        tr("A soft tick as the selection moves from game to game in Home View. It follows the "
+           "emulator's volume and is silent while audio is muted."));
+    ui->GeneralVerticalLayout->addWidget(home_sounds_checkbox);
+
     InitializeLanguageComboBox();
 
     for (const auto& theme : UISettings::themes) {
@@ -210,6 +216,7 @@ void ConfigureUi::ApplyConfiguration() {
     UISettings::values.steamgriddb_api_key =
         steamgriddb_key_edit->text().trimmed().toStdString();
     UISettings::values.download_cover_art = download_covers_checkbox->isChecked();
+    UISettings::values.home_sounds = home_sounds_checkbox->isChecked();
 
     UISettings::values.enable_screenshot_save_as = ui->enable_screenshot_save_as->isChecked();
     Common::FS::SetEdenPath(Common::FS::EdenPath::ScreenshotsDir,
@@ -230,6 +237,7 @@ void ConfigureUi::SetConfiguration() {
     steamgriddb_key_edit->setText(
         QString::fromStdString(UISettings::values.steamgriddb_api_key.GetValue()));
     download_covers_checkbox->setChecked(UISettings::values.download_cover_art.GetValue());
+    home_sounds_checkbox->setChecked(UISettings::values.home_sounds.GetValue());
     ui->theme_combobox->setCurrentIndex(
         ui->theme_combobox->findData(QString::fromStdString(UISettings::values.theme)));
     const QString language = QString::fromStdString(UISettings::values.language.GetValue());

@@ -230,6 +230,8 @@ add_executable(lichii
     util/icon_search.h
     util/cover_art.cpp
     util/cover_art.h
+    util/controller_dialog_navigator.cpp
+    util/controller_dialog_navigator.h
 
     user_data_migration.h user_data_migration.cpp
 
@@ -239,7 +241,6 @@ add_executable(lichii
     nup_dialogs.h nup_dialogs.cpp
     shader_warm_dialog.h shader_warm_dialog.cpp
     recommended_settings_dialog.h recommended_settings_dialog.cpp
-    whats_new_dialog.h whats_new_dialog.cpp
     bug_report_dialog.h bug_report_dialog.cpp
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
@@ -256,9 +257,10 @@ add_executable(lichii
     configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
 
     render/performance_overlay.h render/performance_overlay.cpp
-    updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
+    updater/update_dialog.h updater/update_dialog.cpp
     game/common.h
     game/carousel.h game/carousel.cpp
+    game/game_home.h game/game_home.cpp
 )
 
 # Windows ships as TuttiFruchii.exe; the other platforms keep the lichii binary name their

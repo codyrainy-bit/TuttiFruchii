@@ -450,6 +450,11 @@ private slots:
     void SetGridView();
     void SetTreeView();
     void SetCarouselView();
+    void SetHomeView();
+    /// Hands the home view the menus and the quick-setting chips (the status bar's settings).
+    void SetupHomeView();
+    /// The home view's button hints follow the controller player 1 uses.
+    void UpdateHomeButtonStyle();
 
     void CheckIconSize();
     void ToggleShowGameName();
@@ -543,7 +548,9 @@ private:
 #ifdef ENABLE_UPDATE_CHECKER
     QFuture<UpdateChecker::CheckResult> update_future;
     QFutureWatcher<UpdateChecker::CheckResult> update_watcher;
+    bool update_waiting = false;
 #endif
+    bool whats_new_open = false;
 
     MultiplayerState* multiplayer_state = nullptr;
     void RememberSpeedLimitBeforeHotkey();

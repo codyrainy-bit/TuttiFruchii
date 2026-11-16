@@ -109,7 +109,6 @@ struct Values {
     Setting<bool> first_start{linkage, true, "firstStart", Category::Ui};
     // The last What's new release shown, and whether to show the next one on launch
     Setting<u32> whats_new_version{linkage, 0, "whats_new_version", Category::Ui};
-    Setting<bool> show_whats_new{linkage, true, "show_whats_new", Category::Ui};
     Setting<bool> show_low_ram_warning{linkage, true, "show_low_ram_warning", Category::Ui};
     Setting<bool> pause_when_in_background{linkage,
                                            false,
@@ -179,9 +178,16 @@ struct Values {
     // Optional key that enables the SteamGridDB icon fallback
     Setting<std::string> steamgriddb_api_key{linkage, {}, "steamgriddb_api_key", Category::Ui};
 
+    // The order the user gave the games with Reorder Game Position: program IDs in hex, comma
+    // separated. Games not in it follow in the usual order.
+    Setting<std::string> game_order{linkage, {}, "game_order", Category::UiGameList};
+
     // Downloads cover and banner art for every game in the library (api.nlib.cc by title ID,
     // else Nintendo's eShop search by name)
     Setting<bool> download_cover_art{linkage, true, "download_cover_art", Category::Ui};
+
+    // A soft tick as the home view's selection moves from game to game
+    Setting<bool> home_sounds{linkage, true, "home_sounds", Category::Ui};
 
     // Player 1 uses a connected gamepad (Xbox, PlayStation and others) while it is mapped to the
     // keyboard, and goes back to the keyboard when the gamepad is unplugged
@@ -226,7 +232,7 @@ struct Values {
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
+    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::HomeView, "game_list_mode", Category::UiGameList};
     Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
 
     std::atomic_bool is_game_list_reload_pending{false};

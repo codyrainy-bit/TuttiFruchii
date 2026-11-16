@@ -85,6 +85,10 @@ struct Fsr4PortDevice {
     /// cooperative matrix conversions of VK_NV_cooperative_matrix2, the Vulkan memory model and
     /// 8-bit storage buffers: what the FP8 network's shaders use.
     bool fp8_matrices;
+    /// What descriptor_buffer is made of, to say which part is missing.
+    bool descriptor_buffer_extension = true;
+    bool buffer_device_address = true;
+    bool runtime_descriptor_arrays = true;
 };
 
 struct Fsr4PortSupport {
@@ -114,6 +118,15 @@ constexpr Fsr4PortSupport CheckFsr4Port(const Fsr4PortDevice& device) {
         return {std::nullopt, "needs an RDNA 2 or newer Radeon on Mesa's RADV driver"};
     }
     if (!device.descriptor_buffer) {
+        if (!device.descriptor_buffer_extension) {
+            return {std::nullopt, "VK_EXT_descriptor_buffer is not enabled on the device"};
+        }
+        if (!device.buffer_device_address) {
+            return {std::nullopt, "buffer device addresses are not enabled on the device"};
+        }
+        if (!device.runtime_descriptor_arrays) {
+            return {std::nullopt, "runtime descriptor arrays are not enabled on the device"};
+        }
         return {std::nullopt, "no VK_EXT_descriptor_buffer with buffer device addresses"};
     }
     if (!device.synchronization2) {

@@ -99,11 +99,12 @@ bool RemoveCustomArtwork(u64 program_id);
 
 // Downloaded cover art //
 
-/// The cover art downloaded for a program (square, JPEG). It is cached, so it can be downloaded
-/// again at any time; custom artwork the user picked always wins over it.
+/// The cover art downloaded for a program (square, JPEG, up to 1024 pixels). It is cached, so it
+/// can be downloaded again at any time; custom artwork the user picked always wins over it.
 std::filesystem::path DownloadedCoverPath(u64 program_id);
 
-/// The wide banner art downloaded for a program (1920x1080, JPEG), shown by the loading screen.
+/// The wide banner art downloaded for a program (up to 2560x1440, JPEG), shown by the loading
+/// screen.
 std::filesystem::path DownloadedBannerPath(u64 program_id);
 
 /// Marks a program the cover service has no art for, so it is not asked again every launch.

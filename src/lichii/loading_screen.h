@@ -23,6 +23,9 @@ namespace Loader {
 class AppLoader;
 }
 
+class ControllerNavigation;
+class QAbstractButton;
+
 namespace Ui {
 class LoadingScreen;
 }
@@ -86,7 +89,10 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
-    void ConfirmSkipPreparation();
+    /// Asks before skipping: the shaders not ready yet compile as the game first uses them.
+    void ConfirmSkip();
+    /// A asks to skip (and confirms), B goes back, while the Skip button shows.
+    void OnControllerKey(Qt::Key key);
     /// Scales fonts and margins with the window, so the layout looks the same at any size.
     void ApplyScale();
     /// Renders the art once for the current size: cropped to fill, softened and darkened, with a
@@ -105,6 +111,9 @@ private:
 
     QPushButton* skip_button = nullptr;
     QPointer<QMessageBox> skip_confirm;
+    /// The confirmation's button A presses.
+    QPointer<QAbstractButton> skip_confirm_primary;
+    ControllerNavigation* controller_navigation = nullptr;
     std::unique_ptr<QPropertyAnimation> fadeout_animation;
 
     u64 details_program_id = 0;

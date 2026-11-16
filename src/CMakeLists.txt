@@ -346,7 +346,8 @@ if (ENABLE_QT)
     lichii_add_version_info(lichii "TuttiFruchii" TuttiFruchii.exe)
     if (WIN32 AND ENABLE_UPDATE_CHECKER)
         add_subdirectory(updater)
-        lichii_add_version_info(lichii-updater "Lichii update installer" lichii-updater.exe)
+        lichii_add_version_info(tuttifruchii-updater "TuttiFruchii update installer"
+                                TuttiFruchii-updater.exe)
     endif()
 endif()
 

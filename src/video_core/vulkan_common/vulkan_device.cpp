@@ -850,6 +850,16 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }
+    // From Vulkan 1.2 buffer device addresses are core, so extensions.buffer_device_address is only
+    // set for the KHR extension on older devices. The fsr4-vk port allocates and addresses its own
+    // buffers through them: count the core feature as there while FSR 4 is wanted. Nothing else
+    // changes for other users, whose devices keep the flag as before.
+    if (WantsFsr4Port(driver_id) && !extensions.buffer_device_address &&
+        extensions.descriptor_buffer && instance_version >= VK_API_VERSION_1_2 &&
+        features.buffer_device_address.bufferDeviceAddress) {
+        extensions.buffer_device_address = true;
+        LOG_INFO(Render_Vulkan, "FSR 4: using core buffer device addresses for fsr4-vk");
+    }
 
     // The float16 workarounds above keep shaders from doing float16 arithmetic. Cooperative
     // matrices only pass 16-bit floats to the tensor cores and back, so they keep the device
@@ -1048,7 +1058,7 @@ Device::~Device() {
 }
 
 VideoCommon::Fsr4PortDevice Device::Fsr4PortDevice() const {
-    return {
+    VideoCommon::Fsr4PortDevice port{
         .vendor_id = properties.properties.vendorID,
         .device_id = properties.properties.deviceID,
         .radv = properties.driver.driverID == VK_DRIVER_ID_MESA_RADV,
@@ -1077,6 +1087,10 @@ VideoCommon::Fsr4PortDevice Device::Fsr4PortDevice() const {
                         features.vulkan_memory_model.vulkanMemoryModel &&
                         features.bit8_storage.storageBuffer8BitAccess,
     };
+    port.descriptor_buffer_extension = extensions.descriptor_buffer;
+    port.buffer_device_address = extensions.buffer_device_address;
+    port.runtime_descriptor_arrays = features.descriptor_indexing.runtimeDescriptorArray;
+    return port;
 }
 
 VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {

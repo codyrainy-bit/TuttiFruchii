@@ -98,7 +98,10 @@ QtProfileSelectionDialog::QtProfileSelectionDialog(
 
     connect(tree_view, &QTreeView::clicked, this, &QtProfileSelectionDialog::SelectUser);
     connect(tree_view, &QTreeView::doubleClicked, this, &QtProfileSelectionDialog::accept);
-    connect(controller_navigation, &ControllerNavigation::TriggerKeyboardEvent,
+    // The d-pad's and the stick's directions both move the selection.
+    for (const auto signal : {&ControllerNavigation::TriggerKeyboardEvent,
+                              &ControllerNavigation::TriggerStickDirection})
+        connect(controller_navigation, signal,
             [this](Qt::Key key) {
                 if (!this->isActiveWindow()) {
                     return;

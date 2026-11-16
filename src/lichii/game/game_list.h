@@ -27,6 +27,7 @@
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/util/game.h"
+#include "lichii/game/game_home.h"
 
 class QVariantAnimation;
 
@@ -36,6 +37,7 @@ class GameTree;
 class GameGrid;
 class GameListSearchField;
 class ControllerNavigation;
+class ControllerDialogNavigator;
 class GameListWorker;
 class GameListDir;
 class MainWindow;
@@ -43,6 +45,7 @@ enum class AmLaunchType;
 enum class StartGameType;
 
 class GameCarousel;
+class QTimer;
 
 class QAbstractItemView;
 namespace Core {
@@ -93,6 +96,13 @@ public:
     void UnloadController();
 
     void ResetViewMode();
+
+    /// The home view's pills (the main menus) and quick-setting chips.
+    void SetHomeMenuBar(QMenuBar* menu_bar);
+    void SetHomeChips(std::vector<HomeChip> chips);
+    [[nodiscard]] GameHome* Home() const {
+        return home_view;
+    }
 
 public slots:
     void SetNupConversionRunning(bool running);
@@ -192,10 +202,24 @@ private:
     GameTree* tree_view = nullptr;
     GameGrid* grid_view = nullptr;
     GameCarousel* carousel_view = nullptr;
+    GameHome* home_view = nullptr;
     GameListModel* item_model = nullptr;
     Settings::GameListMode game_list_mode;
 
     ControllerNavigation* controller_navigation = nullptr;
+    /// Repeats a held d-pad or stick direction, as a held arrow key does.
+    QTimer* controller_repeat = nullptr;
+    Qt::Key controller_repeat_key = Qt::Key_unknown;
+    bool controller_repeat_from_stick = false;
+    /// Settings and other modal windows, driven by the controller.
+    ControllerDialogNavigator* dialog_navigator = nullptr;
+    int home_wheel_delta = 0;
+    void PostControllerKey(Qt::Key key, bool repeat, bool from_stick = false);
+    /// Puts the games in the order saved with Reorder Game Position (flat views only).
+    void ApplyGameOrder();
+    void SaveGameOrder();
+    /// The library folder a game was found in, or null for an installed (NAND/SD) title.
+    UISettings::GameDir* GameDirectoryOf(const std::string& path);
 
     QVariantAnimation* vertical_scroll = nullptr;
     QVariantAnimation* horizontal_scroll = nullptr;

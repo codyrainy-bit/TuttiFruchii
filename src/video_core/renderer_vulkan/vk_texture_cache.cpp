@@ -36,6 +36,7 @@
 #include "video_core/nx2.h"
 #include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/upscaler_status.h"
 #include "video_core/stream_stats.h"
 #include "video_core/texture_cache/host_mip_limits.h"
 
@@ -2200,6 +2201,11 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
         sharpen = std::string_view{sharpen_override} != "off";
         stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
     }
+    if (UpscaleWithFsr4(dst_framebuffer, input_color, motion_vectors, depth, render_size, jitter,
+                        motion_scale, frame_time_ms, reset, sharpen,
+                        FSR::RcasSharpnessFromStops(stops))) {
+        return true;
+    }
     try {
         fsr3_upscaler->Upscale({
             .color = input_color.Handle(Shader::TextureType::Color2D),
@@ -2223,10 +2229,107 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
     }
     DrawUpscaledOutput(dst_framebuffer, fsr3_upscaler->OutputView(), fsr3_upscaler->OutputImage(),
                        fsr3_upscaler->PointSampler());
+    VideoCommon::ReportTemporalUpscaler(VideoCommon::TemporalUpscaler::Fsr31);
     static bool logged{};
     if (!logged) {
         logged = true;
         LOG_INFO(Render_Vulkan, "DLSS replaced by FSR 3.1: {}x{} -> {}x{}", render_size[0],
+                 render_size[1], extent.width, extent.height);
+    }
+    return true;
+}
+
+bool TextureCacheRuntime::UpscaleWithFsr4(Framebuffer* dst_framebuffer, ImageView& input_color,
+                                          ImageView& motion_vectors, ImageView& depth,
+                                          std::array<u32, 2> render_size,
+                                          std::array<f32, 2> jitter,
+                                          std::array<f32, 2> motion_scale, f32 frame_time_ms,
+                                          bool reset, bool sharpen, f32 sharpness) {
+    if (fsr4_unsupported) {
+        return false;
+    }
+    if (!fsr4_upscaler) {
+        // IsWanted logs why FSR 4 can't run on this device.
+        if (!Fsr4Upscaler::IsWanted(device)) {
+            fsr4_unsupported = true;
+            return false;
+        }
+        try {
+            fsr4_upscaler = std::make_unique<Fsr4Upscaler>(
+                device, scheduler, memory_allocator, Fsr4Upscaler::Profile::HdrReversedDepth);
+        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan, "FSR 4 unavailable ({}); using FSR 3.1", exception.what());
+            fsr4_unsupported = true;
+            return false;
+        }
+        fsr4_point_sampler = device.GetLogical().CreateSampler(VkSamplerCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_NEAREST,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .mipLodBias = 0.0f,
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1.0f,
+            .compareEnable = VK_FALSE,
+            .compareOp = VK_COMPARE_OP_NEVER,
+            .minLod = 0.0f,
+            .maxLod = VK_LOD_CLAMP_NONE,
+            .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        });
+    }
+    if (fsr4_upscaler->Failed()) {
+        fsr4_unsupported = true;
+        return false;
+    }
+    const auto image = [&](ImageView& view, VkImageAspectFlags aspect) {
+        return Fsr4Upscaler::Image{
+            .image = view.ImageHandle(),
+            .format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, view.format)
+                          .format,
+            .range{
+                .aspectMask = aspect,
+                .baseMipLevel = static_cast<u32>(view.range.base.level),
+                .levelCount = 1,
+                .baseArrayLayer = static_cast<u32>(view.range.base.layer),
+                .layerCount = 1,
+            },
+            .barrier_aspect = ImageAspectMask(view.format),
+        };
+    };
+    const VkExtent2D extent = dst_framebuffer->RenderArea();
+    const bool upscaled = fsr4_upscaler->Upscale({
+        .color = image(input_color, VK_IMAGE_ASPECT_COLOR_BIT),
+        .depth = image(depth, VK_IMAGE_ASPECT_DEPTH_BIT),
+        .motion_vectors = image(motion_vectors, VK_IMAGE_ASPECT_COLOR_BIT),
+        .reactive = std::nullopt,
+        .render_size = {render_size[0], render_size[1]},
+        .upscale_size = extent,
+        .frame_time_ms = frame_time_ms,
+        .reset = reset,
+        .sharpen = sharpen,
+        .sharpness = sharpness,
+        .vertical_fov = 1.0f,
+        .jitter = jitter,
+        .motion_vector_scale = {motion_scale[0] * static_cast<f32>(render_size[0]),
+                                motion_scale[1] * static_cast<f32>(render_size[1])},
+    });
+    if (!upscaled) {
+        fsr4_unsupported = true;
+        return false;
+    }
+    DrawUpscaledOutput(dst_framebuffer, fsr4_upscaler->OutputView(), fsr4_upscaler->OutputImage(),
+                       *fsr4_point_sampler);
+    VideoCommon::ReportTemporalUpscaler(VideoCommon::TemporalUpscaler::Fsr4);
+    static bool logged{};
+    if (!logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "DLSS replaced by FSR 4: {}x{} -> {}x{}", render_size[0],
                  render_size[1], extent.width, extent.height);
     }
     return true;
@@ -2346,6 +2449,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
     DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
                        native_resolution ? dlss_upscaler->LinearSampler()
                                          : dlss_upscaler->PointSampler());
+    VideoCommon::ReportTemporalUpscaler(VideoCommon::TemporalUpscaler::Dlss);
     static bool logged{};
     if (!logged) {
         logged = true;

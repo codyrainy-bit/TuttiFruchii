@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #endif
@@ -424,6 +425,16 @@ public:
                          std::array<f32, 2> motion_scale);
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_unsupported{};
+    /// FSR 4 in place of FSR 3.1 when it is turned on and can run; FSR 3.1 takes over if it fails.
+    std::unique_ptr<Fsr4Upscaler> fsr4_upscaler;
+    bool fsr4_unsupported{};
+    vk::Sampler fsr4_point_sampler;
+    /// FSR 4 for UpscaleWithFsr3; false when it is off, can't run, or failed (then FSR 3.1).
+    bool UpscaleWithFsr4(Framebuffer* dst_framebuffer, ImageView& input_color,
+                         ImageView& motion_vectors, ImageView& depth,
+                         std::array<u32, 2> render_size, std::array<f32, 2> jitter,
+                         std::array<f32, 2> motion_scale, f32 frame_time_ms, bool reset,
+                         bool sharpen, f32 sharpness);
 
     /// The LOD bias Ocarina's FSR adds to mipmapped samplers this session (0 for other games or
     /// upscalers), resolved on first use.

@@ -8,4 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <file alias="lichii_wordmark.png">../../dist/lichii_wordmark.png</file>
         <file alias="lichii_wordmark@2x.png">../../dist/lichii_wordmark@2x.png</file>
     </qresource>
+    <qresource prefix="/text">
+        <file alias="changelog.md">../../dist/changelog.md</file>
+    </qresource>
 </RCC>

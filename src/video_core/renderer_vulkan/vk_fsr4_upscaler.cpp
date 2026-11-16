@@ -212,9 +212,9 @@ bool Fsr4Upscaler::IsWanted(const Device& device) {
 }
 
 Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
-                           MemoryAllocator& memory_allocator_)
+                           MemoryAllocator& memory_allocator_, Profile profile_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_},
-      api{FfxRuntime::Acquire()} {
+      api{FfxRuntime::Acquire()}, profile{profile_} {
     const auto provider = api ? FindFsr4(*api, device) : std::nullopt;
     if (!provider) {
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
@@ -242,10 +242,23 @@ void Fsr4Upscaler::DestroyContext() {
 
 bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size) {
     DestroyContext();
+#if defined(__linux__) && !defined(__ANDROID__)
+    // fsr4-vk looks for the older Vulkan backend description (type 3, the device handles in the
+    // struct itself) and does not know the current one, so it would find no device and answer
+    // FFX_API_RETURN_ERROR_PARAMETER. AMD's runtime, on Windows, takes the current one below.
+    const VkDeviceContext device_context = DeviceContext(device);
+    ffxCreateBackendVKDesc_DEPRECATED backend{};
+    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
+    backend.header.pNext = nullptr;
+    backend.vkDevice = device_context.vkDevice;
+    backend.vkPhysicalDevice = device_context.vkPhysicalDevice;
+    backend.vkDeviceProcAddr = device_context.vkDeviceProcAddr;
+#else
     ffxCreateBackendVKDesc backend{};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     backend.header.pNext = nullptr;
     backend.deviceContext = DeviceContext(device);
+#endif
     ffxOverrideVersion version_override{};
     version_override.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
     version_override.header.pNext = &backend.header;
@@ -258,8 +271,13 @@ bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size
     ffxCreateContextDescUpscale create{};
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     create.header.pNext = &api_version.header;
-    // Tonemapped LDR colour, standard (not reversed) finite depth, exposure given (unit).
-    create.flags = 0;
+    // OcarinaLdr: tonemapped LDR colour, standard (not reversed) finite depth, exposure given
+    // (unit). HdrReversedDepth: HDR colour, reversed depth, exposure worked out by FSR, as FSR 3.1's
+    // profile of the same name.
+    create.flags = profile == Profile::HdrReversedDepth
+                       ? (FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED |
+                          FFX_UPSCALE_ENABLE_AUTO_EXPOSURE)
+                       : 0;
     create.maxRenderSize = {render_size.width, render_size.height};
     create.maxUpscaleSize = {upscale_size.width, upscale_size.height};
     create.fpMessage = Message;
@@ -390,8 +408,10 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
                               FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dispatch.motionVectors = Resource(in.motion_vectors.image, in.motion_vectors.format,
                                       in.render_size, 0, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    dispatch.exposure = Resource(*exposure_image, VK_FORMAT_R32_SFLOAT, {1, 1}, 0,
-                                 FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    if (profile == Profile::OcarinaLdr) {
+        dispatch.exposure = Resource(*exposure_image, VK_FORMAT_R32_SFLOAT, {1, 1}, 0,
+                                     FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    }
     if (in.reactive) {
         dispatch.reactive = Resource(in.reactive->image, in.reactive->format, in.render_size, 0,
                                      FFX_API_RESOURCE_STATE_COMPUTE_READ);
@@ -399,7 +419,7 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     dispatch.output = Resource(*output_image, OUTPUT_FORMAT, in.upscale_size,
                                FFX_API_RESOURCE_USAGE_UAV, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dispatch.jitterOffset = {in.jitter[0], in.jitter[1]};
-    dispatch.motionVectorScale = {1.0f, 1.0f};
+    dispatch.motionVectorScale = {in.motion_vector_scale[0], in.motion_vector_scale[1]};
     dispatch.renderSize = {in.render_size.width, in.render_size.height};
     dispatch.upscaleSize = {in.upscale_size.width, in.upscale_size.height};
     dispatch.enableSharpening = in.sharpen;
