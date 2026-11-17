@@ -103,17 +103,17 @@ struct SharedCodeCache::Impl {
     /// Taken to compile into the code, and by an invalidation (after `mutex`).
     std::mutex compile_mutex;
 
-    /// The code is only cleared or invalidated while no Jit runs it (inside == 0).
+    /// The code is only cleared or invalidated while no Jit runs it (see in_shared_code).
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<Jit::Impl*> members;
-    size_t inside = 0;
-    bool pending = false;
+    /// A change was requested; EnterShared's fast path checks it without the mutex.
+    std::atomic<bool> pending{false};
     bool clear_all = false;
     boost::icl::interval_set<u64> ranges;
     ::Common::unordered_set<IR::LocationDescriptor> blocks;
     /// Bumped by each invalidation: a Jit drops its RSB and fast dispatch entries when it sees it.
-    u64 epoch = 0;
+    std::atomic<u64> epoch{0};
 
     std::atomic<size_t> verify_failures{0};
     std::atomic<size_t> clears{0};
@@ -573,16 +573,35 @@ private:
         seen_epoch = s.epoch;
     }
 
+    /// Under s.mutex. True when no Jit is running the code.
+    static bool NoneInside(const SharedCodeCache::Impl& s) {
+        for (const Jit::Impl* const member : s.members) {
+            if (member->in_shared_code.load(std::memory_order_acquire)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Under s.mutex: makes the pending change if no Jit runs the code. Returns whether it did.
+    static bool TryPerformShared(SharedCodeCache::Impl& s) {
+        if (!s.pending.load(std::memory_order_seq_cst) || !NoneInside(s)) {
+            return false;
+        }
+        PerformShared(s);
+        return true;
+    }
+
     /// Records a change to the shared code and halts every Jit; it is made once none runs the code.
     template<typename Change>
     static void RequestShared(SharedCodeCache::Impl& s, Change&& change) {
         std::unique_lock lock{s.mutex};
         change(s);
-        s.pending = true;
+        s.pending.store(true, std::memory_order_seq_cst);
         for (Jit::Impl* const member : s.members) {
             member->HaltExecution(HaltReason::CacheInvalidation);
         }
-        if (s.inside == 0) {
+        if (NoneInside(s)) {
             PerformShared(s);
         }
     }
@@ -594,7 +613,7 @@ private:
 
     /// Under s.mutex, with no Jit in the code.
     static void PerformShared(SharedCodeCache::Impl& s) {
-        ASSERT(s.inside == 0);
+        ASSERT(NoneInside(s));
         std::scoped_lock compile_lock{s.compile_mutex};
         if (s.clear_all) {
             s.clears.fetch_add(1, std::memory_order_relaxed);
@@ -611,35 +630,45 @@ private:
         s.clear_all = false;
         s.ranges.clear();
         s.blocks.clear();
-        s.pending = false;
-        ++s.epoch;
+        s.pending.store(false, std::memory_order_seq_cst);
+        s.epoch.fetch_add(1, std::memory_order_release);
         s.cv.notify_all();
     }
 
     /// Before running the code: waits out a pending change, then drops what this Jit kept of the
-    /// code from before the last one (its RSB and fast dispatch entries).
+    /// code from before the last one (its RSB and fast dispatch entries). The common case takes no
+    /// lock: `pending` is only set by an invalidation, and the flag/store pair orders it against
+    /// NoneInside.
     void EnterShared() {
+        if (!shared->pending.load(std::memory_order_seq_cst)) {
+            in_shared_code.store(true, std::memory_order_seq_cst);
+            if (!shared->pending.load(std::memory_order_seq_cst)) {
+                ClearHalt(HaltReason::CacheInvalidation);
+                SyncSharedEpoch();
+                return;
+            }
+            in_shared_code.store(false, std::memory_order_release);
+        }
         std::unique_lock lock{shared->mutex};
-        ClearHalt(HaltReason::CacheInvalidation);
-        while (shared->pending) {
-            if (shared->inside == 0) {
-                PerformShared(*shared);
-            } else {
+        while (shared->pending.load(std::memory_order_seq_cst)) {
+            if (!TryPerformShared(*shared)) {
                 shared->cv.wait(lock);
             }
         }
-        ++shared->inside;
+        in_shared_code.store(true, std::memory_order_release);
+        ClearHalt(HaltReason::CacheInvalidation);
         SyncSharedEpoch();
     }
 
     /// Every guest SVC leaves the code (tens of thousands a second per core): no wake-up unless a
     /// change is made, which PerformShared announces itself.
     void LeaveShared() {
-        std::unique_lock lock{shared->mutex};
-        --shared->inside;
-        if (shared->pending && shared->inside == 0) {
-            PerformShared(*shared);
+        in_shared_code.store(false, std::memory_order_release);
+        if (!shared->pending.load(std::memory_order_acquire)) {
+            return;
         }
+        std::unique_lock lock{shared->mutex};
+        TryPerformShared(*shared);
     }
 
     /// The shared code is full: clears it, waiting for the other Jits to leave it. This Jit keeps
@@ -648,20 +677,18 @@ private:
     void ClearSharedFromInside() {
         std::unique_lock lock{shared->mutex};
         shared->clear_all = true;
-        shared->pending = true;
+        shared->pending.store(true, std::memory_order_seq_cst);
         for (Jit::Impl* const member : shared->members) {
             member->HaltExecution(HaltReason::CacheInvalidation);
         }
-        --shared->inside;
-        while (shared->pending) {
-            if (shared->inside == 0) {
-                PerformShared(*shared);
-            } else {
+        in_shared_code.store(false, std::memory_order_release);
+        while (shared->pending.load(std::memory_order_seq_cst)) {
+            if (!TryPerformShared(*shared)) {
                 shared->cv.notify_all();
                 shared->cv.wait(lock);
             }
         }
-        ++shared->inside;
+        in_shared_code.store(true, std::memory_order_release);
         ClearHalt(HaltReason::CacheInvalidation);
         SyncSharedEpoch();
         if (conf.counters) {
@@ -669,12 +696,13 @@ private:
         }
     }
 
-    /// Under shared->mutex.
+    /// Reads an atomic epoch, so it also runs in EnterShared's lock-free path.
     void SyncSharedEpoch() {
-        if (seen_epoch == shared->epoch) {
+        const u64 epoch = shared->epoch.load(std::memory_order_acquire);
+        if (seen_epoch == epoch) {
             return;
         }
-        seen_epoch = shared->epoch;
+        seen_epoch = epoch;
         jit_state.ResetRSB();
         std::fill(fast_dispatch_table.begin(), fast_dispatch_table.end(), A64EmitX64::FastDispatchEntry{});
     }
@@ -735,6 +763,8 @@ private:
 
     SharedCodeCache::Impl* shared = nullptr;
     std::vector<A64EmitX64::FastDispatchEntry> fast_dispatch_table;  ///< Shared code: this Jit's
+    /// Shared code: this Jit runs it, set by EnterShared and cleared by LeaveShared.
+    alignas(64) std::atomic<bool> in_shared_code{false};
     u64 seen_epoch = 0;
 };
 

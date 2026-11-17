@@ -3713,6 +3713,10 @@ void MainWindow::OnGameListImportPipelineCache(u64 program_id) {
 /// build its precompiled file from them, and again when much more has been recorded since. Not
 /// for a game whose precompiled file came from elsewhere (the nx2-precompile tool).
 void MainWindow::OfferPrecompiledBuild(u64 title_id, const std::string& game_path) {
+    if (const char* tas = std::getenv("EDEN_NX2_TAS_AUTOSTART"); tas != nullptr && tas[0] == '1') {
+        // Unattended TAS runs must not wait on a dialog nobody will answer.
+        return;
+    }
     if (title_id == 0 || !Settings::values.use_disk_shader_cache.GetValue() ||
         Settings::values.precompiled_prepare.GetValue() == Settings::PrecompiledPrepare::Never) {
         return;
