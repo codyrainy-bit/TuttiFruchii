@@ -124,6 +124,8 @@ signals:
     void OpenFolderRequested(u64 program_id, GameListOpenTarget target,
                              const std::string& game_path);
     void OpenTransferableShaderCacheRequested(u64 program_id);
+    void ExportPipelineCacheRequested(u64 program_id);
+    void ImportPipelineCacheRequested(u64 program_id);
     void PrepareShaderWarmRequested(u64 program_id, const std::string& game_path);
     void DeleteShaderWarmRequested(u64 program_id);
     void BuildPrecompiledFromPlayRequested(u64 program_id, const std::string& game_path);

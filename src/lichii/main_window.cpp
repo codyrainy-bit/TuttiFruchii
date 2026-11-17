@@ -25,6 +25,8 @@
 #include "video_core/post_processing/fx_preset.h"
 #endif
 #include "updater/update_dialog.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_share.h"
 
 #include "common/fs/ryujinx_compat.h"
 #include "main_window.h"
@@ -91,6 +93,8 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QStandardPaths>
+#include <functional>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -1616,6 +1620,10 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::OpenFolderRequested, this, &MainWindow::OnGameListOpenFolder);
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
             [this](u64 program_id) { QtCommon::Path::OpenShaderCache(program_id, this); });
+    connect(game_list, &GameList::ExportPipelineCacheRequested, this,
+            &MainWindow::OnGameListExportPipelineCache);
+    connect(game_list, &GameList::ImportPipelineCacheRequested, this,
+            &MainWindow::OnGameListImportPipelineCache);
     connect(game_list, &GameList::RemoveInstalledEntryRequested, this,
             &MainWindow::OnGameListRemoveInstalledEntry);
     connect(game_list, &GameList::RemoveFileRequested, this, &MainWindow::OnGameListRemoveFile);
@@ -3572,6 +3580,135 @@ void MainWindow::OnGameListBuildPrecompiledFromPlay(u64 program_id, const std::s
     BuildPrecompiledFromPlay(program_id, game_path, false);
 }
 
+namespace {
+
+/// Runs `work` on a worker thread behind a busy dialog, keeping the window responsive
+VideoCommon::ShaderCacheV2::ShareResult RunPipelineCacheShare(
+    QWidget* parent, const QString& label,
+    std::function<VideoCommon::ShaderCacheV2::ShareResult()> work) {
+    QProgressDialog progress(label, QString{}, 0, 0, parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setCancelButton(nullptr);
+    progress.setMinimumDuration(0);
+    progress.show();
+    QFutureWatcher<VideoCommon::ShaderCacheV2::ShareResult> watcher;
+    QEventLoop loop;
+    QObject::connect(&watcher, &QFutureWatcher<VideoCommon::ShaderCacheV2::ShareResult>::finished,
+                     &loop, &QEventLoop::quit);
+    watcher.setFuture(QtConcurrent::run(std::move(work)));
+    if (!watcher.isFinished()) {
+        loop.exec();
+    }
+    return watcher.result();
+}
+
+QString PipelineCacheShareError(VideoCommon::ShaderCacheV2::ShareStatus status) {
+    using VideoCommon::ShaderCacheV2::ShareStatus;
+    switch (status) {
+    case ShareStatus::NothingToShare:
+        return MainWindow::tr("There are no shaders in it yet. Play the game for a while first.");
+    case ShareStatus::NotACache:
+        return MainWindow::tr("That file is not a TuttiFruchii pipeline cache, or it is damaged.");
+    case ShareStatus::OtherVersion:
+        return MainWindow::tr(
+            "That pipeline cache is from a different version of the cache format.");
+    case ShareStatus::Busy:
+        return MainWindow::tr("The game's pipeline cache is in use. Close the game and try again.");
+    case ShareStatus::Failed:
+    case ShareStatus::Done:
+        break;
+    }
+    return MainWindow::tr("The file could not be written. Check that the folder is writable and "
+                          "has free space.");
+}
+
+} // Anonymous namespace
+
+void MainWindow::OnGameListExportPipelineCache(u64 program_id) {
+    namespace CacheV2 = VideoCommon::ShaderCacheV2;
+    const auto log = TitleShaderDir(program_id) / CacheV2::FileName;
+    const QString suggested =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+            .filePath(QString::number(program_id, 16).rightJustified(16, QLatin1Char('0')).toUpper() +
+                      QStringLiteral("-pipeline-cache.bin"));
+    const QString out = QFileDialog::getSaveFileName(this, tr("Export Pipeline Cache"), suggested,
+                                                     tr("Pipeline cache (*.bin);;All files (*)"));
+    if (out.isEmpty()) {
+        return;
+    }
+    const std::filesystem::path out_path{out.toStdU16String()};
+    const auto result = RunPipelineCacheShare(this, tr("Exporting the pipeline cache..."),
+                                              [log, out_path] {
+                                                  return CacheV2::ExportLog(log, out_path);
+                                              });
+    if (result.status != CacheV2::ShareStatus::Done) {
+        QMessageBox::warning(this, tr("Export Pipeline Cache"),
+                             tr("The pipeline cache was not exported.") +
+                                 QStringLiteral("\n\n") + PipelineCacheShareError(result.status));
+        return;
+    }
+    QMessageBox::information(
+        this, tr("Export Pipeline Cache"),
+        tr("Exported %1 shaders and %2 pipelines to:\n%3\n\nOn another PC, right-click the same "
+           "game and choose Import Pipeline Cache. It works with any GPU: pipelines a GPU can't "
+           "use are skipped.")
+            .arg(result.written.programs)
+            .arg(result.written.graphics + result.written.compute)
+            .arg(QDir::toNativeSeparators(out)));
+}
+
+void MainWindow::OnGameListImportPipelineCache(u64 program_id) {
+    namespace CacheV2 = VideoCommon::ShaderCacheV2;
+    if (emulation_running) {
+        QMessageBox::information(this, tr("Import Pipeline Cache"),
+                                 tr("Stop the game before importing a pipeline cache."));
+        return;
+    }
+    const QString in = QFileDialog::getOpenFileName(
+        this, tr("Import Pipeline Cache"),
+        QStandardPaths::writableLocation(QStandardPaths::DownloadLocation),
+        tr("Pipeline cache (*.bin);;All files (*)"));
+    if (in.isEmpty()) {
+        return;
+    }
+    const auto dir = TitleShaderDir(program_id);
+    std::error_code error;
+    std::filesystem::create_directories(dir, error);
+    const auto log = dir / CacheV2::FileName;
+    const std::filesystem::path in_path{in.toStdU16String()};
+    if (std::filesystem::equivalent(in_path, log, error)) {
+        QMessageBox::information(this, tr("Import Pipeline Cache"),
+                                 tr("That is this game's own pipeline cache."));
+        return;
+    }
+    const auto result = RunPipelineCacheShare(this, tr("Importing the pipeline cache..."),
+                                              [log, in_path] {
+                                                  return CacheV2::ImportLog(log, in_path);
+                                              });
+    const u64 pipelines = result.written.graphics + result.written.compute;
+    if (result.status != CacheV2::ShareStatus::Done) {
+        QString text = tr("The pipeline cache was not imported.");
+        if (result.written.Total() != 0) {
+            text = tr("Only part of the pipeline cache was imported (%1 shaders and %2 "
+                      "pipelines).")
+                       .arg(result.written.programs)
+                       .arg(pipelines);
+        }
+        QMessageBox::warning(this, tr("Import Pipeline Cache"),
+                             text + QStringLiteral("\n\n") +
+                                 PipelineCacheShareError(result.status));
+        return;
+    }
+    QMessageBox::information(
+        this, tr("Import Pipeline Cache"),
+        tr("Added %1 shaders and %2 pipelines to this game's cache; %3 were already in it.\n\n"
+           "They are built the next time the game starts. Pipelines your GPU can't use are "
+           "skipped.")
+            .arg(result.written.programs)
+            .arg(pipelines)
+            .arg(result.already_present));
+}
+
 /// Once the player's play has recorded enough of a Switch 2 game's shaders, the launch offers to
 /// build its precompiled file from them, and again when much more has been recorded since. Not
 /// for a game whose precompiled file came from elsewhere (the nx2-precompile tool).
@@ -4049,6 +4186,27 @@ void MainWindow::OnStartGame() {
     QtCommon::emu_thread->SetRunning(true);
 
     UpdateMenuState();
+
+    // EDEN_NX2_TAS_AUTOSTART=1: plays the TAS scripts from the first start of emulation, for
+    // unattended runs. TAS has to be enabled in the settings.
+    static bool tas_autostarted = false;
+    if (const char* tas = std::getenv("EDEN_NX2_TAS_AUTOSTART");
+        !tas_autostarted && tas != nullptr && tas[0] == '1' && Settings::values.tas_enable) {
+        tas_autostarted = true;
+        auto& tas_input = *input_subsystem->GetTas();
+        tas_input.Reset();
+        if (std::get<0>(tas_input.GetStatus()) != InputCommon::TasInput::TasState::Running) {
+            tas_input.StartStop();
+        }
+        // One script line per 1/60 s of wall-clock time, whatever the game presents (video
+        // and loading screens present few frames).
+        auto* const tas_timer = new QTimer(this);
+        tas_timer->setTimerType(Qt::PreciseTimer);
+        connect(tas_timer, &QTimer::timeout, this,
+                [this] { input_subsystem->GetTas()->UpdateThread(); });
+        tas_timer->start(16);
+        LOG_INFO(Frontend, "EDEN_NX2_TAS_AUTOSTART: playing the TAS scripts");
+    }
     OnTasStateChanged();
 
     play_time_manager->SetProgramId(QtCommon::system->GetApplicationProcessProgramID());

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -166,7 +167,14 @@ GRenderWindow::~GRenderWindow() {
 }
 
 void GRenderWindow::OnFrameDisplayed() {
-    input_subsystem->GetTas()->UpdateThread();
+    // EDEN_NX2_TAS_AUTOSTART steps the TAS on a wall-clock timer instead (MainWindow::OnStartGame).
+    static const bool tas_on_timer = [] {
+        const char* tas = std::getenv("EDEN_NX2_TAS_AUTOSTART");
+        return tas != nullptr && tas[0] == '1';
+    }();
+    if (!tas_on_timer) {
+        input_subsystem->GetTas()->UpdateThread();
+    }
     const InputCommon::TasInput::TasState new_tas_state =
         std::get<0>(input_subsystem->GetTas()->GetStatus());
 
